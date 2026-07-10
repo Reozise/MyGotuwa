@@ -370,7 +370,7 @@ with tab1:
                 wartosc_portfeli = pozycje.groupby("Portfel")["Wartość (zł)"].sum().reset_index()
                 fig2 = px.pie(wartosc_portfeli, values='Wartość (zł)', names='Portfel', hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
                 fig2.update_traces(textposition='inside', textinfo='percent+label')
-                fig2.update_layout(title="Alokacja", margin=dict(t=40, b=0, l=0, r=0), height=300)
+                fig2.update_layout(title="Struktura portfelów", margin=dict(t=40, b=0, l=0, r=0), height=300)
                 st.plotly_chart(fig2, use_container_width=True)
 
             st.divider()
