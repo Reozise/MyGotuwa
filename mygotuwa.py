@@ -29,7 +29,7 @@ def polacz_z_baza():
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(klucz_json, scopes=scopes)
         gc = gspread.authorize(creds)
-        sh = gc.open("Mój Portfel - Baza")
+        sh = gc.open("MyGotuwa")
         return sh
     except Exception as e:
         st.error(f"Błąd logowania do Google Sheets. Sprawdź klucz JSON. Szczegóły: {e}")
