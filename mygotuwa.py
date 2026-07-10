@@ -25,7 +25,7 @@ st.markdown("""
 @st.cache_resource
 def polacz_z_baza():
     try:
-        klucz_json = json.loads(st.secrets["gcp_service_account_json"])
+        klucz_json = json.loads(st.secrets["gcp_service_account_json"], strict=False)
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(klucz_json, scopes=scopes)
         gc = gspread.authorize(creds)
