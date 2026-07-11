@@ -391,10 +391,16 @@ with tab1:
 
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
-                st.dataframe(widok.style.format({
-                    "Ilosc": "{:.4f}", "Wartość (zł)": "{:,.2f} zł", "Zysk/Strata (zł)": "{:,.2f} zł", "ROI (%)": "{:,.2f} %"
-                }).map(lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), subset=["Zysk/Strata (zł)", "ROI (%)"]), 
-                width="stretch", hide_index=True)
+                st.dataframe(
+                    widok.style.format({
+                        "Ilosc": "{:.4f}", 
+                        "Wartość (zł)": "{:,.2f} zł", 
+                        "Zysk/Strata (zł)": "{:,.2f} zł", 
+                        "ROI (%)": "{:,.2f} %"
+                    }).map(lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), subset=["Zysk/Strata (zł)", "ROI (%)"]), 
+                    width="stretch", 
+                    hide_index=True
+                )
 
             else: st.info("Brak otwartych pozycji dla wybranych portfeli.")
         else: st.info("Wybierz przynajmniej jeden portfel z listy powyżej, aby zobaczyć statystyki.")
