@@ -194,7 +194,7 @@ with tab2:
                     float(ilosc if typ == "KUPNO" else -ilosc), 
                     float(cena), 
                     waluta
-                ])
+                ], value_input_option='USER_ENTERED')
                 st.success(f"Dodano {typ} dla {docelowy_ticker} w chmurze!")
                 st.cache_data.clear() 
                 st.rerun()
