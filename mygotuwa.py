@@ -205,7 +205,8 @@ with tab3:
     if not df.empty:
         df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
         # Zwykła, bezpieczna tabela zamiast edytora - chroni przed Segmentation fault
-        st.dataframe(df_historia, use_container_width=True)
+        # Rzutowanie na tekst przed wyświetleniem - dodatkowa ochrona przed crashem PyArrow
+        st.dataframe(df_historia.astype(str), width='stretch')
         st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets. Jest to najbezpieczniejsze dla integralności bazy danych.")
     else:
         st.info("Brak transakcji w chmurze.")
@@ -362,7 +363,7 @@ with tab1:
                     fig_main.add_annotation(x=dates[-1], y=wklad_hist[-1], text=f"{wklad_hist[-1]:.0f}", showarrow=True, ax=40, ay=15, bgcolor="#3b82f6", font=dict(color="white"), arrowcolor="#3b82f6")
 
                 fig_main.update_layout(title="Wkład i wartość wybranych portfeli w czasie [PLN]", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=50, b=0, l=0, r=40), height=500)
-                st.plotly_chart(fig_main, use_container_width=True)
+                st.plotly_chart(fig_main, width='stretch')
                 st.divider()
 
             if not pozycje.empty:
@@ -405,13 +406,13 @@ with tab1:
                     fig1 = px.pie(pozycje, values='Wartość (zł)', names='Ticker', hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
                     fig1.update_traces(textposition='inside', textinfo='percent+label')
                     fig1.update_layout(title="Udział aktywów", margin=dict(t=40, b=0, l=0, r=0), height=300)
-                    st.plotly_chart(fig1, use_container_width=True)
+                    st.plotly_chart(fig1, width='stretch')
                 with w2:
                     wartosc_portfeli = pozycje.groupby("Portfel")["Wartość (zł)"].sum().reset_index()
                     fig2 = px.pie(wartosc_portfeli, values='Wartość (zł)', names='Portfel', hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
                     fig2.update_traces(textposition='inside', textinfo='percent+label')
                     fig2.update_layout(title="Alokacja", margin=dict(t=40, b=0, l=0, r=0), height=300)
-                    st.plotly_chart(fig2, use_container_width=True)
+                    st.plotly_chart(fig2, width='stretch')
 
                 st.divider()
 
@@ -424,7 +425,7 @@ with tab1:
                 widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["ROI (%)"] = widok["ROI (%)"].apply(lambda x: f"{x:.2f} %")
                 
-                st.dataframe(widok, use_container_width=True, hide_index=True)
+                st.dataframe(widok, width='stretch', hide_index=True)
 
             else:
                 st.info("Brak otwartych pozycji dla wybranych portfeli.")
