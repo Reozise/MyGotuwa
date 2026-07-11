@@ -361,8 +361,13 @@ with tab1:
                     pozycje.at[index, "Zysk/Strata (zł)"] = (wart_obecna_oryg * k_wym) - (zainw_oryg * k_wym)
                     pozycje.at[index, "ROI (%)"] = ((wart_obecna_oryg - zainw_oryg) / zainw_oryg) * 100 if zainw_oryg > 0 else 0
 
-                calkowita_wartosc = wartosc_hist[-1] if len(wartosc_hist) > 0 else pozycje["Wartość (zł)"].sum()
-                calkowicie_zainwestowano = wklad_hist[-1] if len(wklad_hist) > 0 else pozycje["Zainwestowano (zł)"].sum()
+                try:
+                    calkowita_wartosc = wartosc_hist[-1]
+                    calkowicie_zainwestowano = wklad_hist[-1]
+                except Exception:
+                    calkowita_wartosc = pozycje["Wartość (zł)"].sum()
+                    calkowicie_zainwestowano = pozycje["Zainwestowano (zł)"].sum()
+
                 calkowity_zysk = calkowita_wartosc - calkowicie_zainwestowano
                 calkowite_roi = (calkowity_zysk / calkowicie_zainwestowano) * 100 if calkowicie_zainwestowano > 0 else 0
 
@@ -391,16 +396,10 @@ with tab1:
 
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
-                st.dataframe(
-                    widok.style.format({
-                        "Ilosc": "{:.4f}", 
-                        "Wartość (zł)": "{:,.2f} zł", 
-                        "Zysk/Strata (zł)": "{:,.2f} zł", 
-                        "ROI (%)": "{:,.2f} %"
-                    }).map(lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), subset=["Zysk/Strata (zł)", "ROI (%)"]), 
-                    width="stretch", 
-                    hide_index=True
-                )
+                st.dataframe(widok.style.format({
+                    "Ilosc": "{:.4f}", "Wartość (zł)": "{:,.2f} zł", "Zysk/Strata (zł)": "{:,.2f} zł", "ROI (%)": "{:,.2f} %"
+                }).map(lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), subset=["Zysk/Strata (zł)", "ROI (%)"]), 
+                width="stretch", hide_index=True)
 
             else: st.info("Brak otwartych pozycji dla wybranych portfeli.")
         else: st.info("Wybierz przynajmniej jeden portfel z listy powyżej, aby zobaczyć statystyki.")
