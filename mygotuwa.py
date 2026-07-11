@@ -29,11 +29,10 @@ def polacz_z_baza():
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(klucz_json, scopes=scopes)
         gc = gspread.authorize(creds)
-        # TUTAJ WKLEJ SWÓJ LINK:
-        sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1tvaqcBeB4HKLXwp22GxsFWRthMNFlu3tz6qTLZh-uMc/edit?gid=0#gid=0")
+        sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1tvaqcBeB4HKLXwp22GxsFWRthMNFlu3tz6qTLZh-uMc/edit?gid=1463083749#gid=1463083749")
         return sh
     except Exception as e:
-        st.error(f"Błąd logowania do Google Sheets. Sprawdź klucz JSON. Szczegóły: {e}")
+        st.error(f"Błąd logowania. Szczegóły: {e}")
         st.stop()
 
 sh = polacz_z_baza()
@@ -60,12 +59,12 @@ if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
 if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
 if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
 
-# --- Funkcja pomocnicza giełdy ---
+# --- Funkcja pomocnicza giełdy (threads=False zapobiega padom serwera) ---
 @st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
 def pobierz_historie_notowan(tickery, start_date):
     if not tickery: return pd.DataFrame()
     symbole = list(set(tickery + ['^GSPC', 'PLN=X', 'EURPLN=X']))
-    dane = yf.download(symbole, start=start_date, progress=False)
+    dane = yf.download(symbole, start=start_date, progress=False, threads=False)
     if isinstance(dane.columns, pd.MultiIndex):
         dane_close = dane['Close']
     else:
@@ -75,32 +74,44 @@ def pobierz_historie_notowan(tickery, start_date):
             dane_close = dane
     return dane_close.ffill().bfill()
 
-# Pobranie transakcji z chmury
+# --- Pobranie i potężne czyszczenie danych ---
 dane_transakcji = ws_transakcje.get_all_records()
 WYMAGANE_KOLUMNY = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Ilosc", "Cena_Zakupu", "Waluta"]
 
 if dane_transakcji:
     df = pd.DataFrame(dane_transakcji)
-    
-    # 1. Usunięcie całkowicie pustych wierszy-widm
     df.replace("", float("NaN"), inplace=True)
     df.dropna(how='all', inplace=True)
     df.fillna("", inplace=True)
     
-    # 2. Wymuszenie czystego tekstu dla kolumn opisowych
     kolumny_tekstowe = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Waluta"]
     for kol in kolumny_tekstowe:
         if kol in df.columns:
             df[kol] = df[kol].astype(str).str.strip()
             
-    # 3. Pancerne czyszczenie liczb (zamiana przecinków na kropki, usuwanie spacji)
     if 'Ilosc' in df.columns:
         df['Ilosc'] = pd.to_numeric(df['Ilosc'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
     if 'Cena_Zakupu' in df.columns:
         df['Cena_Zakupu'] = pd.to_numeric(df['Cena_Zakupu'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
         
-    # 4. Odrzucenie wierszy, które nie mają wpisanego Tickera (śmieciowe dane)
     df = df[df["Ticker"] != ""]
+
+    # AUTO-SYNCHRONIZACJA (To automatycznie doda brakujące tickery, waluty i portfele ze starych transakcji!)
+    nowe_tickery = [t for t in df["Ticker"].unique() if t not in ustawienia["tickery"]]
+    if nowe_tickery:
+        ustawienia["tickery"].extend(nowe_tickery)
+        nadpisz_liste(ws_tickery, ustawienia["tickery"])
+        
+    nowe_portfele = [p for p in df["Portfel"].unique() if p not in ustawienia["portfele"]]
+    if nowe_portfele:
+        ustawienia["portfele"].extend(nowe_portfele)
+        nadpisz_liste(ws_portfele, ustawienia["portfele"])
+        
+    nowe_waluty = [w for w in df["Waluta"].unique() if w not in ustawienia["waluty"]]
+    if nowe_waluty:
+        ustawienia["waluty"].extend(nowe_waluty)
+        nadpisz_liste(ws_waluty, ustawienia["waluty"])
+
 else:
     df = pd.DataFrame(columns=WYMAGANE_KOLUMNY)
 
@@ -123,7 +134,7 @@ for waluta in ustawienia["waluty"]:
         st.sidebar.metric(label=f"{waluta} / PLN", value=f"{kursy[waluta]:.4f} zł", delta="Błąd sieci", delta_color="inverse")
 
 if blad_pobierania: st.sidebar.warning(":material/wifi_off: Tryb Offline")
-else: st.sidebar.success(":material/wifi: Kursy na żywo (Online)")
+else: st.sidebar.success(":material/wifi: Kursy na żywo")
 st.sidebar.divider()
 st.sidebar.info(":material/info: Waluty przeliczane na PLN po bieżącym kursie.")
 
@@ -191,19 +202,11 @@ with tab2:
 # --- ZAKŁADKA 3: HISTORIA ---
 with tab3:
     st.header("Pełna historia operacji")
-    st.write("Edytuj dane i zapisz zmiany do chmury.")
     if not df.empty:
         df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
-        edytowany_df = st.data_editor(df_historia, width="stretch", num_rows="dynamic")
-        if st.button(":material/save: Zapisz zmiany w Google Sheets"):
-            ws_transakcje.clear()
-            ws_transakcje.append_row(WYMAGANE_KOLUMNY)
-            dane_do_zapisu = edytowany_df.fillna("").values.tolist()
-            if dane_do_zapisu:
-                ws_transakcje.append_rows(dane_do_zapisu)
-            st.success("Baza zaktualizowana w chmurze!")
-            st.cache_data.clear()
-            st.rerun()
+        # Zwykła, bezpieczna tabela zamiast edytora - chroni przed Segmentation fault
+        st.dataframe(df_historia, use_container_width=True)
+        st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets. Jest to najbezpieczniejsze dla integralności bazy danych.")
     else:
         st.info("Brak transakcji w chmurze.")
 
@@ -414,18 +417,14 @@ with tab1:
 
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
-                st.dataframe(
-                    widok.style.format({
-                        "Ilosc": "{:.4f}", 
-                        "Wartość (zł)": "{:,.2f} zł", 
-                        "Zysk/Strata (zł)": "{:,.2f} zł", 
-                        "ROI (%)": "{:,.2f} %"
-                    }).map(
-                        lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), 
-                        subset=["Zysk/Strata (zł)", "ROI (%)"]
-                    ), 
-                    width="stretch"
-                )
+                
+                # Zabezpieczenie przed PyArrow Crash - ręczne formatowanie na tekst zamiast styli
+                widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.4f}")
+                widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
+                widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
+                widok["ROI (%)"] = widok["ROI (%)"].apply(lambda x: f"{x:.2f} %")
+                
+                st.dataframe(widok, use_container_width=True, hide_index=True)
 
             else:
                 st.info("Brak otwartych pozycji dla wybranych portfeli.")
