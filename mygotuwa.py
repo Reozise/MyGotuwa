@@ -78,10 +78,29 @@ def pobierz_historie_notowan(tickery, start_date):
 # Pobranie transakcji z chmury
 dane_transakcji = ws_transakcje.get_all_records()
 WYMAGANE_KOLUMNY = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Ilosc", "Cena_Zakupu", "Waluta"]
+
 if dane_transakcji:
     df = pd.DataFrame(dane_transakcji)
-    df['Ilosc'] = pd.to_numeric(df['Ilosc'], errors='coerce')
-    df['Cena_Zakupu'] = pd.to_numeric(df['Cena_Zakupu'], errors='coerce')
+    
+    # 1. Usunięcie całkowicie pustych wierszy-widm
+    df.replace("", float("NaN"), inplace=True)
+    df.dropna(how='all', inplace=True)
+    df.fillna("", inplace=True)
+    
+    # 2. Wymuszenie czystego tekstu dla kolumn opisowych
+    kolumny_tekstowe = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Waluta"]
+    for kol in kolumny_tekstowe:
+        if kol in df.columns:
+            df[kol] = df[kol].astype(str).str.strip()
+            
+    # 3. Pancerne czyszczenie liczb (zamiana przecinków na kropki, usuwanie spacji)
+    if 'Ilosc' in df.columns:
+        df['Ilosc'] = pd.to_numeric(df['Ilosc'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
+    if 'Cena_Zakupu' in df.columns:
+        df['Cena_Zakupu'] = pd.to_numeric(df['Cena_Zakupu'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
+        
+    # 4. Odrzucenie wierszy, które nie mają wpisanego Tickera (śmieciowe dane)
+    df = df[df["Ticker"] != ""]
 else:
     df = pd.DataFrame(columns=WYMAGANE_KOLUMNY)
 
