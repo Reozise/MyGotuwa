@@ -175,7 +175,7 @@ with tab3:
     st.write("Edytuj dane i zapisz zmiany do chmury.")
     if not df.empty:
         df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
-        edytowany_df = st.data_editor(df_historia, width="stretch", num_rows="dynamic", hide_index=True)
+        edytowany_df = st.data_editor(df_historia, width="stretch", num_rows="dynamic")
         if st.button(":material/save: Zapisz zmiany w Google Sheets"):
             ws_transakcje.clear()
             ws_transakcje.append_row(WYMAGANE_KOLUMNY)
@@ -405,8 +405,7 @@ with tab1:
                         lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), 
                         subset=["Zysk/Strata (zł)", "ROI (%)"]
                     ), 
-                    width="stretch", 
-                    hide_index=True
+                    width="stretch"
                 )
 
             else:
