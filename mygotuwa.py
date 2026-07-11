@@ -29,7 +29,8 @@ def polacz_z_baza():
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(klucz_json, scopes=scopes)
         gc = gspread.authorize(creds)
-        sh = gc.open("MyGotuwa")
+        # TUTAJ WKLEJ SWÓJ LINK:
+        sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1tvaqcBeB4HKLXwp22GxsFWRthMNFlu3tz6qTLZh-uMc/edit?gid=0#gid=0")
         return sh
     except Exception as e:
         st.error(f"Błąd logowania do Google Sheets. Sprawdź klucz JSON. Szczegóły: {e}")
@@ -239,7 +240,6 @@ with tab4:
 # --- ZAKŁADKA 1: DASHBOARD ---
 with tab1:
     if not df.empty:
-        # --- NOWY FILTR PORTFELA ---
         st.markdown("### 🎛️ Filtry")
         lista_portfeli = sorted(df["Portfel"].unique().tolist())
         wybrane_portfele = st.multiselect(
@@ -249,7 +249,6 @@ with tab1:
         )
         st.divider()
 
-        # Filtrujemy dane tylko do wybranych portfeli
         df_filtered = df[df["Portfel"].isin(wybrane_portfele)].copy()
 
         if not df_filtered.empty:
@@ -396,11 +395,23 @@ with tab1:
 
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
-                st.dataframe(widok.style.format({
-                    "Ilosc": "{:.4f}", "Wartość (zł)": "{:,.2f} zł", "Zysk/Strata (zł)": "{:,.2f} zł", "ROI (%)": "{:,.2f} %"
-                }).map(lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), subset=["Zysk/Strata (zł)", "ROI (%)"]), 
-                width="stretch", hide_index=True)
+                st.dataframe(
+                    widok.style.format({
+                        "Ilosc": "{:.4f}", 
+                        "Wartość (zł)": "{:,.2f} zł", 
+                        "Zysk/Strata (zł)": "{:,.2f} zł", 
+                        "ROI (%)": "{:,.2f} %"
+                    }).map(
+                        lambda x: 'color: #10b981' if x > 0 else ('color: #ef4444' if x < 0 else ''), 
+                        subset=["Zysk/Strata (zł)", "ROI (%)"]
+                    ), 
+                    width="stretch", 
+                    hide_index=True
+                )
 
-            else: st.info("Brak otwartych pozycji dla wybranych portfeli.")
-        else: st.info("Wybierz przynajmniej jeden portfel z listy powyżej, aby zobaczyć statystyki.")
-    else: st.info("Brak danych transakcyjnych.")
+            else:
+                st.info("Brak otwartych pozycji dla wybranych portfeli.")
+        else:
+            st.info("Wybierz przynajmniej jeden portfel z listy powyżej, aby zobaczyć statystyki.")
+    else:
+        st.info("Brak danych transakcyjnych.")
