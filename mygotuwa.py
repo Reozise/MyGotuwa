@@ -263,19 +263,39 @@ with tab4:
 # --- ZAKŁADKA 1: DASHBOARD ---
 with tab1:
     if not df.empty:
-        st.markdown("### 🎛️ Filtry")
-        lista_portfeli = sorted(df["Portfel"].unique().tolist())
-        wybrane_portfele = st.multiselect(
-            "Wybierz portfele do wyświetlenia:", 
-            options=lista_portfeli, 
-            default=lista_portfeli
-        )
+        st.markdown("### Filtry")
+        
+        col_f1, col_f2 = st.columns(2)
+        
+        with col_f1:
+            lista_portfeli = sorted(df["Portfel"].unique().tolist())
+            wybrane_portfele = st.multiselect(
+                "Wybierz portfele do wyświetlenia:", 
+                options=lista_portfeli, 
+                default=lista_portfeli
+            )
+            
+        with col_f2:
+            df_temp = df[df["Portfel"].isin(wybrane_portfele)] if wybrane_portfele else df
+            lista_aktywow = sorted(df_temp["Nazwa"].unique().tolist())
+            wybrane_aktywa = st.multiselect(
+                "Wybierz aktywa do wyświetlenia:", 
+                options=lista_aktywow, 
+                default=lista_aktywow
+            )
+            
         st.divider()
 
-        df_filtered = df[df["Portfel"].isin(wybrane_portfele)].copy()
+        df_filtered = df[
+            (df["Portfel"].isin(wybrane_portfele)) & 
+            (df["Nazwa"].isin(wybrane_aktywa))
+        ].copy()
 
         if not df_filtered.empty:
-            pozycje = df_filtered.groupby(["Portfel", "Ticker", "Nazwa", "Waluta"]).agg({"Ilosc": "sum", "Cena_Zakupu": "mean"}).reset_index()
+            # Właściwa średnia ważona dla poprawnych wyników
+            df_filtered['Wartosc_Zakupu'] = df_filtered['Ilosc'] * df_filtered['Cena_Zakupu']
+            pozycje = df_filtered.groupby(["Portfel", "Ticker", "Nazwa", "Waluta"]).agg({"Ilosc": "sum", "Wartosc_Zakupu": "sum"}).reset_index()
+            pozycje['Cena_Zakupu'] = pozycje['Wartosc_Zakupu'] / pozycje['Ilosc']
             pozycje = pozycje[pozycje["Ilosc"] > 0] 
             
             waluty_tickerow = {row['Ticker']: row['Waluta'] for _, row in pozycje.iterrows()}
@@ -403,7 +423,8 @@ with tab1:
 
                 w1, w2 = st.columns(2)
                 with w1:
-                    fig1 = px.pie(pozycje, values='Wartość (zł)', names='Ticker', hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
+                    # Wykres z nazwą spółki zamiast tickera
+                    fig1 = px.pie(pozycje, values='Wartość (zł)', names='Nazwa', hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
                     fig1.update_traces(textposition='inside', textinfo='percent+label')
                     fig1.update_layout(title="Udział aktywów", margin=dict(t=40, b=0, l=0, r=0), height=300)
                     st.plotly_chart(fig1, width='stretch')
@@ -419,7 +440,7 @@ with tab1:
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
                 
-                # Zabezpieczenie przed PyArrow Crash - ręczne formatowanie na tekst zamiast styli
+                # Zabezpieczenie przed PyArrow Crash
                 widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.4f}")
                 widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
@@ -428,8 +449,8 @@ with tab1:
                 st.dataframe(widok, width='stretch', hide_index=True)
 
             else:
-                st.info("Brak otwartych pozycji dla wybranych portfeli.")
+                st.info("Brak otwartych pozycji dla wybranych kryteriów.")
         else:
-            st.info("Wybierz przynajmniej jeden portfel z listy powyżej, aby zobaczyć statystyki.")
+            st.info("Wybierz przynajmniej jeden portfel i jedno aktywo z filtrów powyżej, aby zobaczyć statystyki.")
     else:
         st.info("Brak danych transakcyjnych.")
