@@ -1,3 +1,294 @@
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import plotly.express as px
+import plotly.graph_objects as go
+import json
+import numpy as np
+import gspread
+from google.oauth2.service_account import Credentials
+
+# 1. Konfiguracja strony
+st.set_page_config(
+    page_title="Mój Portfel", 
+    page_icon="https://img.icons8.com/fluency/96/portfolio.png", 
+    layout="wide"
+)
+
+st.markdown("""
+    <style>
+    .stMetric { background-color: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# 2. Połączenie z Google Sheets
+@st.cache_resource
+def polacz_z_baza():
+    try:
+        klucz_json = json.loads(st.secrets["gcp_service_account_json"], strict=False)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(klucz_json, scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1tvaqcBeB4HKLXwp22GxsFWRthMNFlu3tz6qTLZh-uMc/edit?gid=1463083749#gid=1463083749")
+        return sh
+    except Exception as e:
+        st.error(f"Błąd logowania. Szczegóły: {e}")
+        st.stop()
+
+sh = polacz_z_baza()
+ws_transakcje = sh.worksheet("Transakcje")
+ws_portfele = sh.worksheet("Portfele")
+ws_waluty = sh.worksheet("Waluty")
+ws_tickery = sh.worksheet("Tickery")
+
+def pobierz_liste(ws):
+    dane = ws.col_values(1)
+    return [d for d in dane if d.strip() != ""]
+
+def nadpisz_liste(ws, nowa_lista):
+    ws.clear()
+    if nowa_lista:
+        ws.append_rows([[x] for x in nowa_lista])
+
+# --- OCHRONA PRZED BLOKADĄ GOOGLE (CACHE) ---
+@st.cache_data(ttl=60, show_spinner="Pobieranie bazy danych z chmury...")
+def pobierz_dane_z_chmury():
+    return {
+        "portfele": pobierz_liste(ws_portfele),
+        "waluty": pobierz_liste(ws_waluty),
+        "tickery": pobierz_liste(ws_tickery),
+        "transakcje": ws_transakcje.get_all_records(numericise_ignore=['all'])
+    }
+
+try:
+    baza = pobierz_dane_z_chmury()
+except Exception as e:
+    st.error("Przekroczono limit zapytań do Google. Odczekaj minutę i odśwież stronę.")
+    st.stop()
+
+ustawienia = {
+    "portfele": list(baza["portfele"]),
+    "waluty": list(baza["waluty"]),
+    "tickery": list(baza["tickery"])
+}
+if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
+if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
+if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
+
+# --- Funkcja pomocnicza giełdy (threads=False zapobiega padom serwera) ---
+@st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
+def pobierz_historie_notowan(tickery, start_date):
+    if not tickery: return pd.DataFrame()
+    symbole = list(set(tickery + ['^GSPC', 'PLN=X', 'EURPLN=X']))
+    dane = yf.download(symbole, start=start_date, progress=False, threads=False)
+    if isinstance(dane.columns, pd.MultiIndex):
+        dane_close = dane['Close']
+    else:
+        if 'Close' in dane.columns:
+            dane_close = pd.DataFrame({symbole[0]: dane['Close']})
+        else:
+            dane_close = dane
+    return dane_close.ffill().bfill()
+
+# --- Pobranie i potężne czyszczenie danych ---
+dane_transakcji = baza["transakcje"]
+WYMAGANE_KOLUMNY = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Ilosc", "Cena_Zakupu", "Waluta"]
+
+if dane_transakcji:
+    df = pd.DataFrame(dane_transakcji)
+    df.replace("", float("NaN"), inplace=True)
+    df.dropna(how='all', inplace=True)
+    df.fillna("", inplace=True)
+    
+    kolumny_tekstowe = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Waluta"]
+    for kol in kolumny_tekstowe:
+        if kol in df.columns:
+            df[kol] = df[kol].astype(str).str.strip()
+            
+    if 'Ilosc' in df.columns:
+        df['Ilosc'] = pd.to_numeric(df['Ilosc'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
+    if 'Cena_Zakupu' in df.columns:
+        df['Cena_Zakupu'] = pd.to_numeric(df['Cena_Zakupu'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
+        
+    df = df[df["Ticker"] != ""]
+
+    # AUTO-SYNCHRONIZACJA (To automatycznie doda brakujące tickery, waluty i portfele ze starych transakcji!)
+    wymaga_zapisania = False
+    nowe_tickery = [t for t in df["Ticker"].unique() if t not in ustawienia["tickery"]]
+    if nowe_tickery:
+        ustawienia["tickery"].extend(nowe_tickery)
+        nadpisz_liste(ws_tickery, ustawienia["tickery"])
+        wymaga_zapisania = True
+        
+    nowe_portfele = [p for p in df["Portfel"].unique() if p not in ustawienia["portfele"]]
+    if nowe_portfele:
+        ustawienia["portfele"].extend(nowe_portfele)
+        nadpisz_liste(ws_portfele, ustawienia["portfele"])
+        wymaga_zapisania = True
+        
+    nowe_waluty = [w for w in df["Waluta"].unique() if w not in ustawienia["waluty"]]
+    if nowe_waluty:
+        ustawienia["waluty"].extend(nowe_waluty)
+        nadpisz_liste(ws_waluty, ustawienia["waluty"])
+        wymaga_zapisania = True
+
+    if wymaga_zapisania:
+        st.cache_data.clear()
+
+else:
+    df = pd.DataFrame(columns=WYMAGANE_KOLUMNY)
+
+# 3. Kursy walut
+st.sidebar.title(":material/currency_exchange: Kursy walut")
+kursy = {"PLN": 1.0}
+blad_pobierania = False
+
+for waluta in ustawienia["waluty"]:
+    if waluta == "PLN": continue
+    try:
+        ticker_waluty = f"{waluta}PLN=X" 
+        kurs = yf.Ticker(ticker_waluty).history(period="1d")['Close'].iloc[0]
+        kursy[waluta] = kurs
+        st.sidebar.metric(label=f"{waluta} / PLN", value=f"{kurs:.4f} zł")
+    except:
+        blad_pobierania = True
+        awaryjne = {"USD": 4.00, "EUR": 4.30, "GBP": 5.00, "CHF": 4.50}
+        kursy[waluta] = awaryjne.get(waluta, 1.0)
+        st.sidebar.metric(label=f"{waluta} / PLN", value=f"{kursy[waluta]:.4f} zł", delta="Błąd sieci", delta_color="inverse")
+
+if blad_pobierania: st.sidebar.warning(":material/wifi_off: Tryb Offline")
+else: st.sidebar.success(":material/wifi: Kursy na żywo")
+st.sidebar.divider()
+st.sidebar.info(":material/info: Waluty przeliczane na PLN po bieżącym kursie.")
+
+st.title(":material/monitoring: Twój Panel Inwestycyjny")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    ":material/dashboard: Dashboard", 
+    ":material/add_circle: Dodaj transakcję",
+    ":material/history: Historia",
+    ":material/settings: Ustawienia"
+])
+
+# --- ZAKŁADKA 2: DODAWANIE TRANSAKCJI ---
+with tab2:
+    st.header("Zarejestruj nową operację")
+    with st.form("dodaj_transakcje", clear_on_submit=True):
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            data_operacji = st.date_input("Data operacji")
+            portfel = st.selectbox("Wybierz portfel", ustawienia["portfele"])
+            opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
+            wybrany_ticker = st.selectbox("Ticker", opcje_tickerow)
+            
+        with col2:
+            st.write(""); st.write("")
+            nowy_ticker = st.text_input("Nowy Ticker (jeśli wybrano ➕)")
+            nazwa = st.text_input("Nazwa aktywa")
+            
+        with col3:
+            st.write(""); st.write("")
+            typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
+            ilosc = st.number_input("Ilość", min_value=0.00001, format="%.5f")
+            
+        with col4:
+            st.write(""); st.write("")
+            waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
+            cena = st.number_input("Cena za sztukę", min_value=0.01)
+            st.write("") 
+            zapisz = st.form_submit_button(":material/save: Zapisz do portfela")
+
+        if zapisz:
+            docelowy_ticker = nowy_ticker.upper().strip() if wybrany_ticker == "➕ Dodaj nowy..." else wybrany_ticker
+            if docelowy_ticker == "":
+                st.error("Podaj poprawny ticker!")
+            else:
+                if docelowy_ticker not in ustawienia["tickery"]:
+                    ustawienia["tickery"].append(docelowy_ticker)
+                    nadpisz_liste(ws_tickery, ustawienia["tickery"])
+                
+                ws_transakcje.append_row([
+                    data_operacji.strftime("%Y-%m-%d"), 
+                    portfel, 
+                    docelowy_ticker, 
+                    nazwa, 
+                    typ, 
+                    float(ilosc if typ == "KUPNO" else -ilosc), 
+                    float(cena), 
+                    waluta
+                ], value_input_option='USER_ENTERED')
+                st.success(f"Dodano {typ} dla {docelowy_ticker} w chmurze!")
+                st.cache_data.clear() 
+                st.rerun()
+
+# --- ZAKŁADKA 3: HISTORIA ---
+with tab3:
+    st.header("Pełna historia operacji")
+    if not df.empty:
+        df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
+        # Zwykła, bezpieczna tabela zamiast edytora - chroni przed Segmentation fault
+        # Rzutowanie na tekst przed wyświetleniem - dodatkowa ochrona przed crashem PyArrow
+        st.dataframe(df_historia.astype(str), width='stretch')
+        st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets. Jest to najbezpieczniejsze dla integralności bazy danych.")
+    else:
+        st.info("Brak transakcji w chmurze.")
+
+# --- ZAKŁADKA 4: USTAWIENIA ---
+with tab4:
+    col_portfele, col_waluty, col_tickery = st.columns(3)
+    
+    with col_portfele:
+        st.subheader(":material/folder_open: Portfele")
+        st.write(", ".join(ustawienia["portfele"]))
+        nowy_portfel = st.text_input("Nowy portfel")
+        if st.button("Dodaj portfel") and nowy_portfel not in ustawienia["portfele"]:
+            ustawienia["portfele"].append(nowy_portfel.strip())
+            nadpisz_liste(ws_portfele, ustawienia["portfele"])
+            st.cache_data.clear()
+            st.rerun()
+        st.divider()
+        portfel_usun = st.selectbox("Wybierz do usunięcia", ustawienia["portfele"], key="del_portfel")
+        if st.button(":material/delete: Usuń portfel") and portfel_usun:
+            ustawienia["portfele"].remove(portfel_usun)
+            nadpisz_liste(ws_portfele, ustawienia["portfele"])
+            st.cache_data.clear()
+            st.rerun()
+
+    with col_waluty:
+        st.subheader(":material/payments: Waluty")
+        st.write(", ".join(ustawienia["waluty"]))
+        nowa_waluta = st.text_input("Nowa waluta")
+        if st.button("Dodaj walutę") and nowa_waluta.upper() not in ustawienia["waluty"]:
+            ustawienia["waluty"].append(nowa_waluta.upper().strip())
+            nadpisz_liste(ws_waluty, ustawienia["waluty"])
+            st.cache_data.clear()
+            st.rerun()
+        st.divider()
+        waluta_usun = st.selectbox("Wybierz do usunięcia", ustawienia["waluty"], key="del_waluta")
+        if st.button(":material/delete: Usuń walutę") and waluta_usun:
+            ustawienia["waluty"].remove(waluta_usun)
+            nadpisz_liste(ws_waluty, ustawienia["waluty"])
+            st.cache_data.clear()
+            st.rerun()
+
+    with col_tickery:
+        st.subheader(":material/show_chart: Tickery")
+        st.write(", ".join(ustawienia["tickery"]))
+        nowy_ticker_ust = st.text_input("Dodaj ticker")
+        if st.button("Dodaj ticker") and nowy_ticker_ust.upper() not in ustawienia["tickery"]:
+            ustawienia["tickery"].append(nowy_ticker_ust.upper().strip())
+            nadpisz_liste(ws_tickery, ustawienia["tickery"])
+            st.cache_data.clear()
+            st.rerun()
+        st.divider()
+        ticker_usun = st.selectbox("Wybierz do usunięcia", ustawienia["tickery"], key="del_ticker")
+        if st.button(":material/delete: Usuń ticker") and ticker_usun:
+            ustawienia["tickery"].remove(ticker_usun)
+            nadpisz_liste(ws_tickery, ustawienia["tickery"])
+            st.cache_data.clear()
+            st.rerun()
+
 # --- ZAKŁADKA 1: DASHBOARD ---
 with tab1:
     if not df.empty:
