@@ -75,7 +75,7 @@ def pobierz_historie_notowan(tickery, start_date):
     return dane_close.ffill().bfill()
 
 # --- Pobranie i potężne czyszczenie danych ---
-dane_transakcji = ws_transakcje.get_all_records()
+dane_transakcji = ws_transakcje.get_all_records(numericise_ignore=['all'])
 WYMAGANE_KOLUMNY = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Ilosc", "Cena_Zakupu", "Waluta"]
 
 if dane_transakcji:
