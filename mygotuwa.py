@@ -112,7 +112,7 @@ if dane_transakcji:
         
     df = df[df["Ticker"] != ""]
 
-    # AUTO-SYNCHRONIZACJA (To automatycznie doda brakujące tickery, waluty i portfele ze starych transakcji!)
+    # AUTO-SYNCHRONIZACJA
     wymaga_zapisania = False
     nowe_tickery = [t for t in df["Ticker"].unique() if t not in ustawienia["tickery"]]
     if nowe_tickery:
@@ -173,7 +173,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # --- ZAKŁADKA 2: DODAWANIE TRANSAKCJI ---
 with tab2:
     st.header("Zarejestruj nową operację")
-    with st.form("dodaj_transakcje", clear_on_submit=True):
+    with st.form("dodaj_transakcje", clear_on_submit=False):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
@@ -183,26 +183,34 @@ with tab2:
             wybrany_ticker = st.selectbox("Ticker", opcje_tickerow)
             
         with col2:
-            st.write(""); st.write("")
-            nowy_ticker = st.text_input("Nowy Ticker (jeśli wybrano ➕)")
-            nazwa = st.text_input("Nazwa aktywa")
+            nowy_ticker = st.text_input("Nowy Ticker (jeśli ➕)")
+            
+            # Pobieranie unikalnych nazw aktywów z historii transakcji
+            opcje_nazw = ["➕ Dodaj nową..."]
+            if not df.empty:
+                istniejace_nazwy = sorted(list(set([str(n).strip() for n in df["Nazwa"] if str(n).strip() != ""])))
+                opcje_nazw.extend(istniejace_nazwy)
+                
+            wybrana_nazwa = st.selectbox("Nazwa aktywa", opcje_nazw)
+            nowa_nazwa = st.text_input("Nowa nazwa (jeśli ➕)")
             
         with col3:
-            st.write(""); st.write("")
             typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
-            ilosc = st.number_input("Ilość", min_value=0.00001, format="%.5f")
+            ilosc = st.number_input("Ilość", min_value=0.00001, format="%g")
             
         with col4:
-            st.write(""); st.write("")
             waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
-            cena = st.number_input("Cena za sztukę", min_value=0.01)
+            cena = st.number_input("Cena za sztukę", min_value=0.01, format="%g")
+            st.write("") 
             st.write("") 
             zapisz = st.form_submit_button(":material/save: Zapisz do portfela")
 
         if zapisz:
             docelowy_ticker = nowy_ticker.upper().strip() if wybrany_ticker == "➕ Dodaj nowy..." else wybrany_ticker
-            if docelowy_ticker == "":
-                st.error("Podaj poprawny ticker!")
+            docelowa_nazwa = nowa_nazwa.strip() if wybrana_nazwa == "➕ Dodaj nową..." else wybrana_nazwa
+            
+            if docelowy_ticker == "" or docelowa_nazwa == "":
+                st.error("Podaj poprawny ticker i nazwę!")
             else:
                 if docelowy_ticker not in ustawienia["tickery"]:
                     ustawienia["tickery"].append(docelowy_ticker)
@@ -212,7 +220,7 @@ with tab2:
                     data_operacji.strftime("%Y-%m-%d"), 
                     portfel, 
                     docelowy_ticker, 
-                    nazwa, 
+                    docelowa_nazwa, 
                     typ, 
                     float(ilosc if typ == "KUPNO" else -ilosc), 
                     float(cena), 
@@ -227,8 +235,6 @@ with tab3:
     st.header("Pełna historia operacji")
     if not df.empty:
         df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
-        # Zwykła, bezpieczna tabela zamiast edytora - chroni przed Segmentation fault
-        # Rzutowanie na tekst przed wyświetleniem - dodatkowa ochrona przed crashem PyArrow
         st.dataframe(df_historia.astype(str), width='stretch')
         st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets. Jest to najbezpieczniejsze dla integralności bazy danych.")
     else:
@@ -321,7 +327,6 @@ with tab1:
         ].copy()
 
         if not df_filtered.empty:
-            # Właściwa średnia ważona dla poprawnych wyników
             df_filtered['Wartosc_Zakupu'] = df_filtered['Ilosc'] * df_filtered['Cena_Zakupu']
             pozycje = df_filtered.groupby(["Portfel", "Ticker", "Nazwa", "Waluta"]).agg({"Ilosc": "sum", "Wartosc_Zakupu": "sum"}).reset_index()
             pozycje['Cena_Zakupu'] = pozycje['Wartosc_Zakupu'] / pozycje['Ilosc']
@@ -425,8 +430,12 @@ with tab1:
                     
                     zainw_oryg = row["Cena_Zakupu"] * row["Ilosc"]
                     wart_obecna_oryg = aktualna_cena * row["Ilosc"]
-                    pozycje.at[index, "Cena zakupu"] = f"{row['Cena_Zakupu']:.2f} {w_akt}"
-                    pozycje.at[index, "Obecna Cena"] = f"{aktualna_cena:.2f} {w_akt}"
+                    
+                    cz_czysta = f"{row['Cena_Zakupu']:.6f}".rstrip('0').rstrip('.')
+                    oc_czysta = f"{aktualna_cena:.6f}".rstrip('0').rstrip('.')
+                    
+                    pozycje.at[index, "Cena zakupu"] = f"{cz_czysta} {w_akt}"
+                    pozycje.at[index, "Obecna Cena"] = f"{oc_czysta} {w_akt}"
                     pozycje.at[index, "Zainwestowano (zł)"] = zainw_oryg * k_wym
                     pozycje.at[index, "Wartość (zł)"] = wart_obecna_oryg * k_wym
                     pozycje.at[index, "Zysk/Strata (zł)"] = (wart_obecna_oryg * k_wym) - (zainw_oryg * k_wym)
@@ -452,7 +461,6 @@ with tab1:
 
                 w1, w2 = st.columns(2)
                 with w1:
-                    # Wykres z nazwą spółki zamiast tickera
                     fig1 = px.pie(pozycje, values='Wartość (zł)', names='Nazwa', hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel)
                     fig1.update_traces(textposition='inside', textinfo='percent+label')
                     fig1.update_layout(title="Udział aktywów", margin=dict(t=40, b=0, l=0, r=0), height=300)
@@ -469,8 +477,8 @@ with tab1:
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
                 
-                # Zabezpieczenie przed PyArrow Crash
-                widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.4f}")
+                # Usunięcie zer z Ilości w tabeli
+                widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.6f}".rstrip('0').rstrip('.'))
                 widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["ROI (%)"] = widok["ROI (%)"].apply(lambda x: f"{x:.2f} %")
