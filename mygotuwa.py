@@ -173,62 +173,63 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # --- ZAKŁADKA 2: DODAWANIE TRANSAKCJI ---
 with tab2:
     st.header("Zarejestruj nową operację")
-    with st.form("dodaj_transakcje", clear_on_submit=False):
-        col1, col2, col3, col4 = st.columns(4)
+    
+    # Dynamiczny layout bez st.form - reaguje na wybory na bieżąco
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        data_operacji = st.date_input("Data operacji")
+        portfel = st.selectbox("Wybierz portfel", ustawienia["portfele"])
         
-        with col1:
-            data_operacji = st.date_input("Data operacji")
-            portfel = st.selectbox("Wybierz portfel", ustawienia["portfele"])
-            opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
-            wybrany_ticker = st.selectbox("Ticker", opcje_tickerow)
-            
-        with col2:
-            nowy_ticker = st.text_input("Nowy Ticker (jeśli ➕)")
-            
-            # Pobieranie unikalnych nazw aktywów z historii transakcji
-            opcje_nazw = ["➕ Dodaj nową..."]
-            if not df.empty:
-                istniejace_nazwy = sorted(list(set([str(n).strip() for n in df["Nazwa"] if str(n).strip() != ""])))
-                opcje_nazw.extend(istniejace_nazwy)
-                
-            wybrana_nazwa = st.selectbox("Nazwa aktywa", opcje_nazw)
-            nowa_nazwa = st.text_input("Nowa nazwa (jeśli ➕)")
-            
-        with col3:
-            typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
-            ilosc = st.number_input("Ilość", min_value=0.00001, format="%g")
-            
-        with col4:
-            waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
-            cena = st.number_input("Cena za sztukę", min_value=0.01, format="%g")
-            st.write("") 
-            st.write("") 
-            zapisz = st.form_submit_button(":material/save: Zapisz do portfela")
-
-        if zapisz:
-            docelowy_ticker = nowy_ticker.upper().strip() if wybrany_ticker == "➕ Dodaj nowy..." else wybrany_ticker
-            docelowa_nazwa = nowa_nazwa.strip() if wybrana_nazwa == "➕ Dodaj nową..." else wybrana_nazwa
-            
-            if docelowy_ticker == "" or docelowa_nazwa == "":
-                st.error("Podaj poprawny ticker i nazwę!")
+    with col2:
+        opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
+        wybrany_ticker = st.selectbox("Wybierz Ticker", opcje_tickerow)
+        
+        # Pojawia się tylko wtedy, gdy dodajemy nową spółkę
+        if wybrany_ticker == "➕ Dodaj nowy...":
+            docelowy_ticker = st.text_input("Nowy symbol (np. AAPL)").upper().strip()
+            docelowa_nazwa = st.text_input("Nazwa spółki").strip()
+        else:
+            docelowy_ticker = wybrany_ticker
+            # Aplikacja sprawdza w historii, jak nazywa się ten Ticker, i nie pyta o to po raz drugi
+            znane_nazwy = [str(n).strip() for n in df[df["Ticker"] == docelowy_ticker]["Nazwa"].unique() if str(n).strip()]
+            if znane_nazwy:
+                docelowa_nazwa = znane_nazwy[0]
+                st.info(f"🏷️ {docelowa_nazwa}")
             else:
-                if docelowy_ticker not in ustawienia["tickery"]:
-                    ustawienia["tickery"].append(docelowy_ticker)
-                    nadpisz_liste(ws_tickery, ustawienia["tickery"])
+                docelowa_nazwa = st.text_input("Podaj nazwę dla tego tickera").strip()
                 
-                ws_transakcje.append_row([
-                    data_operacji.strftime("%Y-%m-%d"), 
-                    portfel, 
-                    docelowy_ticker, 
-                    docelowa_nazwa, 
-                    typ, 
-                    float(ilosc if typ == "KUPNO" else -ilosc), 
-                    float(cena), 
-                    waluta
-                ], value_input_option='USER_ENTERED')
-                st.success(f"Dodano {typ} dla {docelowy_ticker} w chmurze!")
-                st.cache_data.clear() 
-                st.rerun()
+    with col3:
+        typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
+        waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
+        
+    with col4:
+        ilosc = st.number_input("Ilość", min_value=0.00001, format="%g")
+        cena = st.number_input("Cena za sztukę", min_value=0.01, format="%g")
+        st.write("") 
+        zapisz = st.button("💾 Zapisz do portfela", type="primary", use_container_width=True)
+
+    if zapisz:
+        if docelowy_ticker == "" or docelowa_nazwa == "":
+            st.error("Podaj poprawny ticker i nazwę!")
+        else:
+            if docelowy_ticker not in ustawienia["tickery"]:
+                ustawienia["tickery"].append(docelowy_ticker)
+                nadpisz_liste(ws_tickery, ustawienia["tickery"])
+            
+            ws_transakcje.append_row([
+                data_operacji.strftime("%Y-%m-%d"), 
+                portfel, 
+                docelowy_ticker, 
+                docelowa_nazwa, 
+                typ, 
+                float(ilosc if typ == "KUPNO" else -ilosc), 
+                float(cena), 
+                waluta
+            ], value_input_option='USER_ENTERED')
+            st.success(f"Dodano {typ} dla {docelowy_ticker} w chmurze!")
+            st.cache_data.clear() 
+            st.rerun()
 
 # --- ZAKŁADKA 3: HISTORIA ---
 with tab3:
