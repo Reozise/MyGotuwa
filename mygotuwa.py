@@ -81,7 +81,6 @@ def pobierz_historie_notowan(tickery, start_date):
     if not tickery: return pd.DataFrame()
     symbole = list(set(tickery + ['^GSPC', 'PLN=X', 'EURPLN=X']))
     
-    # Odfiltrowujemy obligacje przed wysłaniem do Yahoo Finance
     symbole_yf = [t for t in symbole if not str(t).endswith('_OBL')]
     if not symbole_yf: return pd.DataFrame()
     
@@ -142,7 +141,7 @@ if dane_transakcji:
 else:
     df = pd.DataFrame(columns=WYMAGANE_KOLUMNY)
 
-# 3. Kursy walut
+# 3. Kursy walut i Suwaki Obligacji
 st.sidebar.title(":material/currency_exchange: Kursy walut")
 kursy = {"PLN": 1.0}
 blad_pobierania = False
@@ -162,8 +161,13 @@ for waluta in ustawienia["waluty"]:
 
 if blad_pobierania: st.sidebar.warning(":material/wifi_off: Tryb Offline")
 else: st.sidebar.success(":material/wifi: Kursy na żywo")
+
+# ZAAWANSOWANE SUWAKI DLA OBLIGACJI (EDO/COI)
 st.sidebar.divider()
-st.sidebar.info(":material/info: Waluty przeliczane na PLN po bieżącym kursie.")
+st.sidebar.subheader("Obligacje (np. EDO, COI)")
+oprocentowanie_1r = st.sidebar.slider("Oprocentowanie w 1. roku (%)", min_value=1.0, max_value=15.0, value=5.35, step=0.05)
+oprocentowanie_kolejne = st.sidebar.slider("Kolejne lata: Inflacja + Marża (%)", min_value=1.0, max_value=15.0, value=6.25, step=0.05)
+st.sidebar.info("Aplikacja śledzi wiek każdej kupionej transzy. Po 365 dniach automatycznie przełącza zyski na tryb inflacyjny (FIFO).")
 
 st.title(":material/monitoring: Twój Panel Inwestycyjny")
 
@@ -178,7 +182,6 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab2:
     st.header("Zarejestruj nową operację")
     
-    # Wyciągnęliśmy to z "zamrażarki" (st.form), aby interfejs reagował "na żywo"!
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -187,19 +190,14 @@ with tab2:
         
     with col2:
         opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
-        
-        # Kosmetyka - ukrywamy dopisek OBL na rozwijanej liście dla ładnego wyglądu
         format_func = lambda x: x.replace('_OBL', ' (Obligacja)') if x != "➕ Dodaj nowy..." else x
         wybrany_ticker = st.selectbox("Wybierz Ticker", opcje_tickerow, format_func=format_func)
         
-        # Opcje pojawiają się lub znikają na żywo
         if wybrany_ticker == "➕ Dodaj nowy...":
             docelowy_ticker_input = st.text_input("Nowy symbol (np. AAPL lub EDO1032)").upper().strip()
             docelowa_nazwa_input = st.text_input("Nazwa aktywa").strip()
         else:
             docelowy_ticker_input = wybrany_ticker
-            
-            # Wyszukujemy po tickerze. Jeśli już go mamy w bazie, od razu pokazujemy nazwę
             znane_nazwy = [str(n).strip() for n in df[df["Ticker"] == docelowy_ticker_input]["Nazwa"].unique() if str(n).strip()]
             if znane_nazwy:
                 docelowa_nazwa_input = znane_nazwy[0]
@@ -209,7 +207,7 @@ with tab2:
                 
     with col3:
         typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
-        czy_obligacja = st.checkbox("To jest Obligacje Skarbowe", help="Zabezpiecza wartość na wykresie.")
+        czy_obligacja = st.checkbox("Obligacje Skarbowe", help="Włącza specjalny algorytm kapitalizacji dla polskich obligacji.")
         waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
         
     with col4:
@@ -222,7 +220,6 @@ with tab2:
         docelowy_ticker = docelowy_ticker_input
         docelowa_nazwa = docelowa_nazwa_input
         
-        # Dodajemy niewidzialną tarczę tylko gdy wpisujemy zupełnie nowy Ticker
         if wybrany_ticker == "➕ Dodaj nowy..." and czy_obligacja and not docelowy_ticker.endswith("_OBL"):
             docelowy_ticker = f"{docelowy_ticker}_OBL"
             
@@ -252,10 +249,9 @@ with tab3:
     st.header("Pełna historia operacji")
     if not df.empty:
         df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
-        # Oczyszczamy widok historii z brzydkich dopisków _OBL
         df_historia["Ticker"] = df_historia["Ticker"].str.replace("_OBL", "")
         st.dataframe(df_historia.astype(str), width='stretch')
-        st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets. Jest to najbezpieczniejsze dla integralności bazy danych.")
+        st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets.")
     else:
         st.info("Brak transakcji w chmurze.")
 
@@ -374,9 +370,25 @@ with tab1:
                 infl_kapital = 0.0
                 dzienna_stopa_infl = (1 + 0.06) ** (1/365) - 1 
                 
+                # Zmienne giełdowe i obligacyjne
+                dzienna_stopa_1 = (1 + oprocentowanie_1r / 100) ** (1/365) - 1
+                dzienna_stopa_2 = (1 + oprocentowanie_kolejne / 100) ** (1/365) - 1
+                
+                aktywne_obligacje = [] # Przechowuje poszczególne transze: {'ticker': 'X', 'data_zakupu': D, 'kwota': PLN, 'ilosc_szt': N}
                 ilosc_aktywow = {t: 0.0 for t in df_filtered['Ticker'].unique()}
                 
                 for d in dates:
+                    # Ranna kapitalizacja obligacji na dany dzień
+                    if d != dates[0]:
+                        infl_kapital = infl_kapital * (1 + dzienna_stopa_infl)
+                        for obl in aktywne_obligacje:
+                            if obl['kwota'] > 0:
+                                wiek_dni = (d - obl['data_zakupu']).days
+                                if wiek_dni <= 365:
+                                    obl['kwota'] *= (1 + dzienna_stopa_1)
+                                else:
+                                    obl['kwota'] *= (1 + dzienna_stopa_2)
+
                     tx_dnia = df_filtered[df_filtered['Data'] == d]
                     for _, tx in tx_dnia.iterrows():
                         w = tx['Waluta']
@@ -393,33 +405,61 @@ with tab1:
                         zainwestowano_suma += kwota
                         ilosc_aktywow[tx['Ticker']] += tx['Ilosc']
                         
+                        # Rejestracja i obsługa transz obligacji
+                        if str(tx['Ticker']).endswith('_OBL'):
+                            if tx['Ilosc'] > 0:
+                                aktywne_obligacje.append({
+                                    'ticker': tx['Ticker'],
+                                    'data_zakupu': d,
+                                    'kwota': kwota,
+                                    'ilosc_szt': tx['Ilosc']
+                                })
+                            else:
+                                # Metoda FIFO przy sprzedaży obligacji
+                                sztuki_do_odjecia = abs(tx['Ilosc'])
+                                for obl in aktywne_obligacje:
+                                    if obl['ticker'] == tx['Ticker'] and obl['ilosc_szt'] > 0:
+                                        if obl['ilosc_szt'] >= sztuki_do_odjecia:
+                                            proporcja = sztuki_do_odjecia / obl['ilosc_szt']
+                                            obl['kwota'] -= obl['kwota'] * proporcja
+                                            obl['ilosc_szt'] -= sztuki_do_odjecia
+                                            sztuki_do_odjecia = 0
+                                            break
+                                        else:
+                                            sztuki_do_odjecia -= obl['ilosc_szt']
+                                            obl['kwota'] = 0.0
+                                            obl['ilosc_szt'] = 0.0
+                        
                         sp500_cena = hist_data.loc[d, '^GSPC'] if '^GSPC' in hist_data.columns else 1.0
                         if pd.isna(sp500_cena) or sp500_cena <= 0: sp500_cena = 1.0
-                        
                         sp500_shares += kwota / sp500_cena
                         infl_kapital += kwota
                     
-                    if d != dates[0]:
-                        infl_kapital = infl_kapital * (1 + dzienna_stopa_infl)
-                    
                     dzienna_wartosc = 0.0
+                    wartosc_obligacji_w_dniu = {}
+                    for obl in aktywne_obligacje:
+                        wartosc_obligacji_w_dniu[obl['ticker']] = wartosc_obligacji_w_dniu.get(obl['ticker'], 0.0) + obl['kwota']
+
                     for t, ilosc in ilosc_aktywow.items():
                         if ilosc > 0:
-                            cena_t = hist_data.loc[d, t] if t in hist_data.columns else np.nan
-                            if pd.isna(cena_t): 
-                                cena_t = srednia_cena.get(t, 0.0)
+                            if str(t).endswith('_OBL'):
+                                dzienna_wartosc += wartosc_obligacji_w_dniu.get(t, 0.0)
+                            else:
+                                cena_t = hist_data.loc[d, t] if t in hist_data.columns else np.nan
+                                if pd.isna(cena_t): 
+                                    cena_t = srednia_cena.get(t, 0.0)
+                                    
+                                w = waluty_tickerow.get(t, 'PLN')
+                                fx = hist_data.loc[d, 'PLN=X'] if 'PLN=X' in hist_data.columns else 4.0
+                                if pd.isna(fx): fx = 4.0
                                 
-                            w = waluty_tickerow.get(t, 'PLN')
-                            fx = hist_data.loc[d, 'PLN=X'] if 'PLN=X' in hist_data.columns else 4.0
-                            if pd.isna(fx): fx = 4.0
-                            
-                            if w == 'EUR': 
-                                fx = hist_data.loc[d, 'EURPLN=X'] if 'EURPLN=X' in hist_data.columns else 4.3
-                                if pd.isna(fx): fx = 4.3
-                            elif w == 'PLN': 
-                                fx = 1.0
-                                
-                            dzienna_wartosc += ilosc * cena_t * fx
+                                if w == 'EUR': 
+                                    fx = hist_data.loc[d, 'EURPLN=X'] if 'EURPLN=X' in hist_data.columns else 4.3
+                                    if pd.isna(fx): fx = 4.3
+                                elif w == 'PLN': 
+                                    fx = 1.0
+                                    
+                                dzienna_wartosc += ilosc * cena_t * fx
                             
                     wklad_hist.append(zainwestowano_suma)
                     wartosc_hist.append(dzienna_wartosc)
@@ -448,11 +488,21 @@ with tab1:
                     ticker = row["Ticker"]
                     w_akt = row["Waluta"]
                     k_wym = kursy.get(w_akt, 1.0)
-                    aktualna_cena = hist_data[ticker].iloc[-1] if not hist_data.empty and ticker in hist_data.columns else row["Cena_Zakupu"]
-                    if pd.isna(aktualna_cena): aktualna_cena = row["Cena_Zakupu"]
+                    
+                    if str(ticker).endswith('_OBL'):
+                        wartosc_obl_calkowita = sum(obl['kwota'] for obl in aktywne_obligacje if obl['ticker'] == ticker)
+                        if row["Ilosc"] > 0:
+                            wart_obecna_oryg = wartosc_obl_calkowita / k_wym if k_wym > 0 else wartosc_obl_calkowita
+                            aktualna_cena = wart_obecna_oryg / row["Ilosc"]
+                        else:
+                            wart_obecna_oryg = 0.0
+                            aktualna_cena = row["Cena_Zakupu"]
+                    else:
+                        aktualna_cena = hist_data[ticker].iloc[-1] if not hist_data.empty and ticker in hist_data.columns else row["Cena_Zakupu"]
+                        if pd.isna(aktualna_cena): aktualna_cena = row["Cena_Zakupu"]
+                        wart_obecna_oryg = aktualna_cena * row["Ilosc"]
                     
                     zainw_oryg = row["Cena_Zakupu"] * row["Ilosc"]
-                    wart_obecna_oryg = aktualna_cena * row["Ilosc"]
                     
                     cz_czysta = f"{row['Cena_Zakupu']:.6f}".rstrip('0').rstrip('.')
                     oc_czysta = f"{aktualna_cena:.6f}".rstrip('0').rstrip('.')
@@ -500,7 +550,6 @@ with tab1:
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
                 
-                # Usunięcie roboczego markera "_OBL" z tabeli
                 widok["Ticker"] = widok["Ticker"].str.replace("_OBL", "")
                 widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.6f}".rstrip('0').rstrip('.'))
                 widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
