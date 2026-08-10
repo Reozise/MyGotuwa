@@ -75,17 +75,22 @@ if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
 if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
 if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
 
-# --- Funkcja pomocnicza giełdy (threads=False zapobiega padom serwera) ---
+# --- Funkcja pomocnicza giełdy (Omija Obligacje) ---
 @st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
 def pobierz_historie_notowan(tickery, start_date):
     if not tickery: return pd.DataFrame()
     symbole = list(set(tickery + ['^GSPC', 'PLN=X', 'EURPLN=X']))
-    dane = yf.download(symbole, start=start_date, progress=False, threads=False)
+    
+    # Odfiltrowujemy obligacje przed wysłaniem do Yahoo Finance
+    symbole_yf = [t for t in symbole if not str(t).endswith('_OBL')]
+    if not symbole_yf: return pd.DataFrame()
+    
+    dane = yf.download(symbole_yf, start=start_date, progress=False, threads=False)
     if isinstance(dane.columns, pd.MultiIndex):
         dane_close = dane['Close']
     else:
         if 'Close' in dane.columns:
-            dane_close = pd.DataFrame({symbole[0]: dane['Close']})
+            dane_close = pd.DataFrame({symbole_yf[0]: dane['Close']})
         else:
             dane_close = dane
     return dane_close.ffill().bfill()
@@ -112,7 +117,6 @@ if dane_transakcji:
         
     df = df[df["Ticker"] != ""]
 
-    # AUTO-SYNCHRONIZACJA
     wymaga_zapisania = False
     nowe_tickery = [t for t in df["Ticker"].unique() if t not in ustawienia["tickery"]]
     if nowe_tickery:
@@ -174,70 +178,78 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab2:
     st.header("Zarejestruj nową operację")
     
-    # Dynamiczny layout bez st.form - reaguje na wybory na bieżąco
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        data_operacji = st.date_input("Data operacji")
-        portfel = st.selectbox("Wybierz portfel", ustawienia["portfele"])
+    with st.form("dodaj_transakcje", clear_on_submit=False):
+        col1, col2, col3, col4 = st.columns(4)
         
-    with col2:
-        opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
-        wybrany_ticker = st.selectbox("Wybierz Ticker", opcje_tickerow)
-        
-        # Pojawia się tylko wtedy, gdy dodajemy nową spółkę
-        if wybrany_ticker == "➕ Dodaj nowy...":
-            docelowy_ticker = st.text_input("Nowy symbol (np. AAPL)").upper().strip()
-            docelowa_nazwa = st.text_input("Nazwa spółki").strip()
-        else:
-            docelowy_ticker = wybrany_ticker
-            # Aplikacja sprawdza w historii, jak nazywa się ten Ticker, i nie pyta o to po raz drugi
-            znane_nazwy = [str(n).strip() for n in df[df["Ticker"] == docelowy_ticker]["Nazwa"].unique() if str(n).strip()]
-            if znane_nazwy:
-                docelowa_nazwa = znane_nazwy[0]
-                st.info(f"🏷️ {docelowa_nazwa}")
-            else:
-                docelowa_nazwa = st.text_input("Podaj nazwę dla tego tickera").strip()
-                
-    with col3:
-        typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
-        waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
-        
-    with col4:
-        ilosc = st.number_input("Ilość", min_value=0.00001, format="%g")
-        cena = st.number_input("Cena za sztukę", min_value=0.01, format="%g")
-        st.write("") 
-        zapisz = st.button("💾 Zapisz do portfela", type="primary", use_container_width=True)
-
-    if zapisz:
-        if docelowy_ticker == "" or docelowa_nazwa == "":
-            st.error("Podaj poprawny ticker i nazwę!")
-        else:
-            if docelowy_ticker not in ustawienia["tickery"]:
-                ustawienia["tickery"].append(docelowy_ticker)
-                nadpisz_liste(ws_tickery, ustawienia["tickery"])
+        with col1:
+            data_operacji = st.date_input("Data operacji")
+            portfel = st.selectbox("Wybierz portfel", ustawienia["portfele"])
             
-            ws_transakcje.append_row([
-                data_operacji.strftime("%Y-%m-%d"), 
-                portfel, 
-                docelowy_ticker, 
-                docelowa_nazwa, 
-                typ, 
-                float(ilosc if typ == "KUPNO" else -ilosc), 
-                float(cena), 
-                waluta
-            ], value_input_option='USER_ENTERED')
-            st.success(f"Dodano {typ} dla {docelowy_ticker} w chmurze!")
-            st.cache_data.clear() 
-            st.rerun()
+        with col2:
+            opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
+            wybrany_ticker = st.selectbox("Wybierz Ticker", opcje_tickerow)
+            
+            if wybrany_ticker == "➕ Dodaj nowy...":
+                docelowy_ticker_input = st.text_input("Nowy symbol (np. AAPL lub EDO1032)").upper().strip()
+                docelowa_nazwa_input = st.text_input("Nazwa aktywa").strip()
+            else:
+                docelowy_ticker_input = wybrany_ticker
+                znane_nazwy = [str(n).strip() for n in df[df["Ticker"] == docelowy_ticker_input]["Nazwa"].unique() if str(n).strip()]
+                if znane_nazwy:
+                    docelowa_nazwa_input = znane_nazwy[0]
+                    st.info(f"🏷️ {docelowa_nazwa_input}")
+                else:
+                    docelowa_nazwa_input = st.text_input("Podaj nazwę dla tego tickera").strip()
+                    
+        with col3:
+            typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
+            czy_obligacje = st.checkbox("🇵🇱 To są Obligacje Skarbowe", help="Zabezpiecza wartość na wykresie i zapobiega błędom pobierania z giełdy.")
+            waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
+            
+        with col4:
+            ilosc = st.number_input("Ilość", min_value=0.00001, format="%g")
+            cena = st.number_input("Cena za sztukę", min_value=0.01, format="%g")
+            st.write("") 
+            zapisz = st.form_submit_button(":material/save: Zapisz do portfela")
+
+        if zapisz:
+            docelowy_ticker = docelowy_ticker_input
+            docelowa_nazwa = docelowa_nazwa_input
+            
+            # Magiczna tarcza ochronna dla obligacji
+            if czy_obligacje and not docelowy_ticker.endswith("_OBL"):
+                docelowy_ticker = f"{docelowy_ticker}_OBL"
+                
+            if docelowy_ticker == "" or docelowa_nazwa == "":
+                st.error("Podaj poprawny ticker i nazwę!")
+            else:
+                if docelowy_ticker not in ustawienia["tickery"]:
+                    ustawienia["tickery"].append(docelowy_ticker)
+                    nadpisz_liste(ws_tickery, ustawienia["tickery"])
+                
+                ws_transakcje.append_row([
+                    data_operacji.strftime("%Y-%m-%d"), 
+                    portfel, 
+                    docelowy_ticker, 
+                    docelowa_nazwa, 
+                    typ, 
+                    float(ilosc if typ == "KUPNO" else -ilosc), 
+                    float(cena), 
+                    waluta
+                ], value_input_option='USER_ENTERED')
+                st.success(f"Dodano {typ} dla {docelowy_ticker.replace('_OBL', '')} w chmurze!")
+                st.cache_data.clear() 
+                st.rerun()
 
 # --- ZAKŁADKA 3: HISTORIA ---
 with tab3:
     st.header("Pełna historia operacji")
     if not df.empty:
         df_historia = df.sort_values(by="Data", ascending=False).reset_index(drop=True)
+        # Oczyszczamy widok historii z brzydkich dopisków _OBL
+        df_historia["Ticker"] = df_historia["Ticker"].str.replace("_OBL", "")
         st.dataframe(df_historia.astype(str), width='stretch')
-        st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets. Jest to najbezpieczniejsze dla integralności bazy danych.")
+        st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets.")
     else:
         st.info("Brak transakcji w chmurze.")
 
@@ -281,7 +293,7 @@ with tab4:
 
     with col_tickery:
         st.subheader(":material/show_chart: Tickery")
-        st.write(", ".join(ustawienia["tickery"]))
+        st.write(", ".join([t.replace('_OBL', ' (Obligacje)') for t in ustawienia["tickery"]]))
         nowy_ticker_ust = st.text_input("Dodaj ticker")
         if st.button("Dodaj ticker") and nowy_ticker_ust.upper() not in ustawienia["tickery"]:
             ustawienia["tickery"].append(nowy_ticker_ust.upper().strip())
@@ -341,10 +353,14 @@ with tab1:
             
             hist_data = pobierz_historie_notowan(df_filtered['Ticker'].unique().tolist(), start_date)
             
-            if not hist_data.empty:
+            if not hist_data.empty or True: # Wymusza przeliczenie nawet gdy mamy tylko same obligacje
                 dates = pd.date_range(start=start_date, end=pd.Timestamp.today())
-                hist_data.index = hist_data.index.tz_localize(None)
-                hist_data = hist_data.reindex(dates).ffill().bfill()
+                
+                if not hist_data.empty:
+                    hist_data.index = hist_data.index.tz_localize(None)
+                    hist_data = hist_data.reindex(dates).ffill().bfill()
+                else:
+                    hist_data = pd.DataFrame(index=dates)
                 
                 wklad_hist, wartosc_hist, sp500_hist, infl_hist = [], [], [], []
                 zainwestowano_suma = 0.0
@@ -385,6 +401,7 @@ with tab1:
                         if ilosc > 0:
                             cena_t = hist_data.loc[d, t] if t in hist_data.columns else np.nan
                             if pd.isna(cena_t): 
+                                # Magia Obligacji - jeśli nie ma danych na giełdzie, trzyma żelazną wartość zakupu
                                 cena_t = srednia_cena.get(t, 0.0)
                                 
                             w = waluty_tickerow.get(t, 'PLN')
@@ -478,7 +495,8 @@ with tab1:
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
                 
-                # Usunięcie zer z Ilości w tabeli
+                # Zabezpieczenie przed PyArrow Crash + usunięcie roboczego markera "_OBL" z tabeli
+                widok["Ticker"] = widok["Ticker"].str.replace("_OBL", "")
                 widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.6f}".rstrip('0').rstrip('.'))
                 widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
