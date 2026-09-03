@@ -75,12 +75,12 @@ if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
 if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
 if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
 
-# --- Funkcja pomocnicza giełdy (Omija Obligacje, ładuje S&P500 i czysty WIG20) ---
+# --- Funkcja pomocnicza giełdy (Omija Obligacje, używa niezawodnego ETF dla WIG20) ---
 @st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
 def pobierz_historie_notowan(tickery, start_date):
     if not tickery: return pd.DataFrame()
-    # Tutaj przywracamy oficjalny WIG20.WA
-    symbole = list(set(tickery + ['^GSPC', 'WIG20.WA', 'PLN=X', 'EURPLN=X']))
+    # Używamy ETFW20L.WA, który idealnie naśladuje polski WIG20
+    symbole = list(set(tickery + ['^GSPC', 'ETFW20L.WA', 'PLN=X', 'EURPLN=X']))
     
     symbole_yf = [t for t in symbole if not str(t).endswith('_OBL')]
     if not symbole_yf: return pd.DataFrame()
@@ -436,8 +436,7 @@ with tab1:
                         if pd.isna(sp500_cena) or sp500_cena <= 0: sp500_cena = 1.0
                         sp500_shares += kwota / sp500_cena
                         
-                        # Tutaj jest ten przywrócony oryginalny WIG20.WA z Yahoo!
-                        wig20_cena = hist_data.loc[d, 'WIG20.WA'] if 'WIG20.WA' in hist_data.columns else 1.0
+                        wig20_cena = hist_data.loc[d, 'ETFW20L.WA'] if 'ETFW20L.WA' in hist_data.columns else 1.0
                         if pd.isna(wig20_cena) or wig20_cena <= 0: wig20_cena = 1.0
                         wig20_shares += kwota / wig20_cena
                         
@@ -477,8 +476,7 @@ with tab1:
                     if pd.isna(sp500_curr_price): sp500_curr_price = 1.0
                     sp500_hist.append(sp500_shares * sp500_curr_price)
                     
-                    # I tutaj również przywrócony czysty WIG20.WA
-                    wig20_curr_price = hist_data.loc[d, 'WIG20.WA'] if 'WIG20.WA' in hist_data.columns else 1.0
+                    wig20_curr_price = hist_data.loc[d, 'ETFW20L.WA'] if 'ETFW20L.WA' in hist_data.columns else 1.0
                     if pd.isna(wig20_curr_price): wig20_curr_price = 1.0
                     wig20_hist.append(wig20_shares * wig20_curr_price)
                 
