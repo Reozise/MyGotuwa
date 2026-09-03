@@ -75,11 +75,11 @@ if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
 if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
 if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
 
-# --- Funkcja pomocnicza giełdy (Omija Obligacje, dodaje WIG20) ---
+# --- Funkcja pomocnicza giełdy (Omija Obligacje, ładuje S&P500 i czysty WIG20) ---
 @st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
 def pobierz_historie_notowan(tickery, start_date):
     if not tickery: return pd.DataFrame()
-    # Dodajemy WIG20.WA do symboli bazowych
+    # Tutaj przywracamy oficjalny WIG20.WA
     symbole = list(set(tickery + ['^GSPC', 'WIG20.WA', 'PLN=X', 'EURPLN=X']))
     
     symbole_yf = [t for t in symbole if not str(t).endswith('_OBL')]
@@ -417,7 +417,6 @@ with tab1:
                                     'ilosc_szt': tx['Ilosc']
                                 })
                             else:
-                                # Metoda FIFO przy sprzedaży obligacji
                                 sztuki_do_odjecia = abs(tx['Ilosc'])
                                 for obl in aktywne_obligacje:
                                     if obl['ticker'] == tx['Ticker'] and obl['ilosc_szt'] > 0:
@@ -437,6 +436,7 @@ with tab1:
                         if pd.isna(sp500_cena) or sp500_cena <= 0: sp500_cena = 1.0
                         sp500_shares += kwota / sp500_cena
                         
+                        # Tutaj jest ten przywrócony oryginalny WIG20.WA z Yahoo!
                         wig20_cena = hist_data.loc[d, 'WIG20.WA'] if 'WIG20.WA' in hist_data.columns else 1.0
                         if pd.isna(wig20_cena) or wig20_cena <= 0: wig20_cena = 1.0
                         wig20_shares += kwota / wig20_cena
@@ -477,6 +477,7 @@ with tab1:
                     if pd.isna(sp500_curr_price): sp500_curr_price = 1.0
                     sp500_hist.append(sp500_shares * sp500_curr_price)
                     
+                    # I tutaj również przywrócony czysty WIG20.WA
                     wig20_curr_price = hist_data.loc[d, 'WIG20.WA'] if 'WIG20.WA' in hist_data.columns else 1.0
                     if pd.isna(wig20_curr_price): wig20_curr_price = 1.0
                     wig20_hist.append(wig20_shares * wig20_curr_price)
@@ -517,7 +518,7 @@ with tab1:
                     
                     zainw_oryg = row["Cena_Zakupu"] * row["Ilosc"]
                     
-                    # Idealne ucinanie do dwóch miejsc po przecinku w tabeli!
+                    # Idealne ucinanie do dwóch miejsc po przecinku
                     pozycje.at[index, "Cena zakupu"] = f"{row['Cena_Zakupu']:.2f} {w_akt}"
                     pozycje.at[index, "Obecna Cena"] = f"{aktualna_cena:.2f} {w_akt}"
                     pozycje.at[index, "Zainwestowano (zł)"] = zainw_oryg * k_wym
@@ -580,7 +581,6 @@ with tab1:
                         pass
                     return ''
                 
-                # Nakładanie styli tylko na Zysk/Strata i ROI
                 if hasattr(widok.style, 'map'):
                     styled_widok = widok.style.map(koloruj_wynik, subset=["Zysk/Strata (zł)", "ROI (%)"])
                 else:
