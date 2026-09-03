@@ -75,11 +75,12 @@ if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
 if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
 if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
 
-# --- Funkcja pomocnicza giełdy (Omija Obligacje) ---
+# --- Funkcja pomocnicza giełdy (Omija Obligacje, dodaje WIG20) ---
 @st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
 def pobierz_historie_notowan(tickery, start_date):
     if not tickery: return pd.DataFrame()
-    symbole = list(set(tickery + ['^GSPC', 'PLN=X', 'EURPLN=X']))
+    # Dodajemy WIG20.WA do symboli bazowych
+    symbole = list(set(tickery + ['^GSPC', 'WIG20.WA', 'PLN=X', 'EURPLN=X']))
     
     symbole_yf = [t for t in symbole if not str(t).endswith('_OBL')]
     if not symbole_yf: return pd.DataFrame()
@@ -164,7 +165,7 @@ else: st.sidebar.success(":material/wifi: Kursy na żywo")
 
 # ZAAWANSOWANE SUWAKI DLA OBLIGACJI (EDO/COI)
 st.sidebar.divider()
-st.sidebar.subheader("Obligacje (np. EDO, COI)")
+st.sidebar.subheader("🇵🇱 Obligacje (np. EDO, COI)")
 oprocentowanie_1r = st.sidebar.slider("Oprocentowanie w 1. roku (%)", min_value=1.0, max_value=15.0, value=5.35, step=0.05)
 oprocentowanie_kolejne = st.sidebar.slider("Kolejne lata: Inflacja + Marża (%)", min_value=1.0, max_value=15.0, value=6.25, step=0.05)
 st.sidebar.info("Aplikacja śledzi wiek każdej kupionej transzy. Po 365 dniach automatycznie przełącza zyski na tryb inflacyjny (FIFO).")
@@ -207,7 +208,7 @@ with tab2:
                 
     with col3:
         typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
-        czy_obligacja = st.checkbox("Obligacje Skarbowe", help="Włącza specjalny algorytm kapitalizacji dla polskich obligacji.")
+        czy_obligacja = st.checkbox("🇵🇱 To jest Obligacja Skarbowa", help="Włącza specjalny algorytm kapitalizacji dla polskich obligacji.")
         waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
         
     with col4:
@@ -364,9 +365,10 @@ with tab1:
                 else:
                     hist_data = pd.DataFrame(index=dates)
                 
-                wklad_hist, wartosc_hist, sp500_hist, infl_hist = [], [], [], []
+                wklad_hist, wartosc_hist, sp500_hist, infl_hist, wig20_hist = [], [], [], [], []
                 zainwestowano_suma = 0.0
                 sp500_shares = 0.0
+                wig20_shares = 0.0
                 infl_kapital = 0.0
                 dzienna_stopa_infl = (1 + 0.06) ** (1/365) - 1 
                 
@@ -374,7 +376,7 @@ with tab1:
                 dzienna_stopa_1 = (1 + oprocentowanie_1r / 100) ** (1/365) - 1
                 dzienna_stopa_2 = (1 + oprocentowanie_kolejne / 100) ** (1/365) - 1
                 
-                aktywne_obligacje = [] # Przechowuje poszczególne transze: {'ticker': 'X', 'data_zakupu': D, 'kwota': PLN, 'ilosc_szt': N}
+                aktywne_obligacje = [] 
                 ilosc_aktywow = {t: 0.0 for t in df_filtered['Ticker'].unique()}
                 
                 for d in dates:
@@ -430,9 +432,15 @@ with tab1:
                                             obl['kwota'] = 0.0
                                             obl['ilosc_szt'] = 0.0
                         
+                        # Wirtualne zakupy indeksów
                         sp500_cena = hist_data.loc[d, '^GSPC'] if '^GSPC' in hist_data.columns else 1.0
                         if pd.isna(sp500_cena) or sp500_cena <= 0: sp500_cena = 1.0
                         sp500_shares += kwota / sp500_cena
+                        
+                        wig20_cena = hist_data.loc[d, 'WIG20.WA'] if 'WIG20.WA' in hist_data.columns else 1.0
+                        if pd.isna(wig20_cena) or wig20_cena <= 0: wig20_cena = 1.0
+                        wig20_shares += kwota / wig20_cena
+                        
                         infl_kapital += kwota
                     
                     dzienna_wartosc = 0.0
@@ -468,11 +476,16 @@ with tab1:
                     sp500_curr_price = hist_data.loc[d, '^GSPC'] if '^GSPC' in hist_data.columns else 1.0
                     if pd.isna(sp500_curr_price): sp500_curr_price = 1.0
                     sp500_hist.append(sp500_shares * sp500_curr_price)
+                    
+                    wig20_curr_price = hist_data.loc[d, 'WIG20.WA'] if 'WIG20.WA' in hist_data.columns else 1.0
+                    if pd.isna(wig20_curr_price): wig20_curr_price = 1.0
+                    wig20_hist.append(wig20_shares * wig20_curr_price)
                 
                 fig_main = go.Figure()
                 fig_main.add_trace(go.Scatter(x=dates, y=wartosc_hist, mode='lines', name='Wartość portfela', line=dict(color='#10b981', width=2.5), fill='tozeroy', fillcolor='rgba(16, 185, 129, 0.15)'))
                 fig_main.add_trace(go.Scatter(x=dates, y=wklad_hist, mode='lines', name='Wkład własny', line=dict(color='#3b82f6', width=2.5)))
                 fig_main.add_trace(go.Scatter(x=dates, y=sp500_hist, mode='lines', name='S&P 500', line=dict(color='#f59e0b', width=1.5, dash='dash')))
+                fig_main.add_trace(go.Scatter(x=dates, y=wig20_hist, mode='lines', name='WIG20', line=dict(color='#8b5cf6', width=1.5, dash='dashdot')))
                 fig_main.add_trace(go.Scatter(x=dates, y=infl_hist, mode='lines', name='Inflacja', line=dict(color='#ef4444', width=1.5, dash='dot')))
                 
                 if len(dates) > 0:
@@ -504,11 +517,9 @@ with tab1:
                     
                     zainw_oryg = row["Cena_Zakupu"] * row["Ilosc"]
                     
-                    cz_czysta = f"{row['Cena_Zakupu']:.6f}".rstrip('0').rstrip('.')
-                    oc_czysta = f"{aktualna_cena:.6f}".rstrip('0').rstrip('.')
-                    
-                    pozycje.at[index, "Cena zakupu"] = f"{cz_czysta} {w_akt}"
-                    pozycje.at[index, "Obecna Cena"] = f"{oc_czysta} {w_akt}"
+                    # Idealne ucinanie do dwóch miejsc po przecinku w tabeli!
+                    pozycje.at[index, "Cena zakupu"] = f"{row['Cena_Zakupu']:.2f} {w_akt}"
+                    pozycje.at[index, "Obecna Cena"] = f"{aktualna_cena:.2f} {w_akt}"
                     pozycje.at[index, "Zainwestowano (zł)"] = zainw_oryg * k_wym
                     pozycje.at[index, "Wartość (zł)"] = wart_obecna_oryg * k_wym
                     pozycje.at[index, "Zysk/Strata (zł)"] = (wart_obecna_oryg * k_wym) - (zainw_oryg * k_wym)
@@ -551,12 +562,31 @@ with tab1:
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
                 
                 widok["Ticker"] = widok["Ticker"].str.replace("_OBL", "")
-                widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.6f}".rstrip('0').rstrip('.'))
+                widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.4f}".rstrip('0').rstrip('.') if '.' in f"{x:.4f}" else f"{x:.4f}")
                 widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["ROI (%)"] = widok["ROI (%)"].apply(lambda x: f"{x:.2f} %")
                 
-                st.dataframe(widok, width='stretch', hide_index=True)
+                # Funkcja malująca komórki na zielono i czerwono
+                def koloruj_wynik(val):
+                    try:
+                        v = str(val).replace(' ', '').replace('zł', '').replace('%', '')
+                        num = float(v)
+                        if num > 0:
+                            return 'color: #10b981;'
+                        elif num < 0:
+                            return 'color: #ef4444;'
+                    except:
+                        pass
+                    return ''
+                
+                # Nakładanie styli tylko na Zysk/Strata i ROI
+                if hasattr(widok.style, 'map'):
+                    styled_widok = widok.style.map(koloruj_wynik, subset=["Zysk/Strata (zł)", "ROI (%)"])
+                else:
+                    styled_widok = widok.style.applymap(koloruj_wynik, subset=["Zysk/Strata (zł)", "ROI (%)"])
+                
+                st.dataframe(styled_widok, width='stretch', hide_index=True)
 
             else:
                 st.info("Brak otwartych pozycji dla wybranych kryteriów.")
