@@ -10,8 +10,8 @@ from google.oauth2.service_account import Credentials
 
 # 1. Konfiguracja strony
 st.set_page_config(
-    page_title="Mój Portfel", 
-    page_icon="https://img.icons8.com/fluency/96/portfolio.png", 
+    page_title="Mój Portfel",
+    page_icon="https://img.icons8.com/fluency/96/portfolio.png",
     layout="wide"
 )
 
@@ -20,6 +20,11 @@ st.markdown("""
     .stMetric { background-color: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
+
+# Jak często (w sekundach) odświeżać notowania i kursy walut z Yahoo Finance
+CACHE_NOTOWAN_SEK = 300
+# Kursy awaryjne - używane tylko, gdy Yahoo nie odpowiada
+KURSY_AWARYJNE = {"USD": 4.00, "EUR": 4.30, "GBP": 5.00, "CHF": 4.50}
 
 # 2. Połączenie z Google Sheets
 @st.cache_resource
@@ -75,17 +80,27 @@ if not ustawienia["portfele"]: ustawienia["portfele"] = ["Główny"]
 if not ustawienia["waluty"]: ustawienia["waluty"] = ["PLN"]
 if not ustawienia["tickery"]: ustawienia["tickery"] = ["AAPL"]
 
-# --- Funkcja pomocnicza giełdy (Omija Obligacje, używa niezawodnego ETF dla WIG20) ---
-@st.cache_data(ttl=3600, show_spinner="Pobieranie danych z giełdy...")
-def pobierz_historie_notowan(tickery, start_date):
-    if not tickery: return pd.DataFrame()
-    # Używamy ETFW20L.WA, który idealnie naśladuje polski WIG20
-    symbole = list(set(tickery + ['^GSPC', 'ETFW20L.WA', 'PLN=X', 'EURPLN=X']))
-    
+# --- Funkcje pomocnicze giełdy ---
+def symbol_fx(waluta):
+    """Symbol Yahoo dla kursu waluty do PLN, np. USD -> USDPLN=X"""
+    return f"{waluta}PLN=X"
+
+@st.cache_data(ttl=CACHE_NOTOWAN_SEK, show_spinner="Pobieranie danych z giełdy...")
+def pobierz_historie_notowan(tickery, waluty, start_date):
+    # Obligacje (_OBL) nie istnieją na giełdzie - są liczone osobno.
+    # ETFW20L.WA naśladuje polski WIG20, USDPLN=X służy do przeliczenia S&P 500 na złote.
+    symbole = list(dict.fromkeys(
+        list(tickery) + ['^GSPC', 'ETFW20L.WA', 'USDPLN=X'] + [symbol_fx(w) for w in waluty if w != "PLN"]
+    ))
     symbole_yf = [t for t in symbole if not str(t).endswith('_OBL')]
-    if not symbole_yf: return pd.DataFrame()
-    
+    if not symbole_yf:
+        return pd.DataFrame(), ""
+
     dane = yf.download(symbole_yf, start=start_date, progress=False, threads=False)
+    if dane is None or dane.empty:
+        # Wyjątek zapobiega zapamiętaniu pustego wyniku w cache
+        raise RuntimeError("Yahoo Finance nie zwróciło danych")
+
     if isinstance(dane.columns, pd.MultiIndex):
         dane_close = dane['Close']
     else:
@@ -93,7 +108,36 @@ def pobierz_historie_notowan(tickery, start_date):
             dane_close = pd.DataFrame({symbole_yf[0]: dane['Close']})
         else:
             dane_close = dane
-    return dane_close.ffill().bfill()
+    czas_pobrania = pd.Timestamp.now(tz="Europe/Warsaw").strftime("%H:%M")
+    return dane_close.ffill().bfill(), czas_pobrania
+
+@st.cache_data(ttl=CACHE_NOTOWAN_SEK, show_spinner=False)
+def pobierz_kurs_walut(waluta):
+    dane = yf.Ticker(symbol_fx(waluta)).history(period="5d")['Close'].dropna()
+    if dane.empty:
+        raise ValueError("Brak kursu")
+    return float(dane.iloc[-1])
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def pobierz_walute_notowan(ticker):
+    waluta = yf.Ticker(ticker).fast_info["currency"]
+    if not waluta:
+        raise ValueError("Brak waluty")
+    return str(waluta)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def pobierz_nazwe_tickera(ticker):
+    info = yf.Ticker(ticker).info
+    nazwa = info.get("shortName") or info.get("longName")
+    if not nazwa:
+        raise ValueError("Brak nazwy")
+    return str(nazwa)
+
+def bezpiecznie(funkcja, *args):
+    try:
+        return funkcja(*args)
+    except Exception:
+        return None
 
 # --- Pobranie i potężne czyszczenie danych ---
 dane_transakcji = baza["transakcje"]
@@ -104,17 +148,17 @@ if dane_transakcji:
     df.replace("", float("NaN"), inplace=True)
     df.dropna(how='all', inplace=True)
     df.fillna("", inplace=True)
-    
+
     kolumny_tekstowe = ["Data", "Portfel", "Ticker", "Nazwa", "Typ", "Waluta"]
     for kol in kolumny_tekstowe:
         if kol in df.columns:
             df[kol] = df[kol].astype(str).str.strip()
-            
+
     if 'Ilosc' in df.columns:
         df['Ilosc'] = pd.to_numeric(df['Ilosc'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
     if 'Cena_Zakupu' in df.columns:
         df['Cena_Zakupu'] = pd.to_numeric(df['Cena_Zakupu'].astype(str).str.replace(',', '.').str.replace(' ', ''), errors='coerce').fillna(0.0)
-        
+
     df = df[df["Ticker"] != ""]
 
     wymaga_zapisania = False
@@ -123,13 +167,13 @@ if dane_transakcji:
         ustawienia["tickery"].extend(nowe_tickery)
         nadpisz_liste(ws_tickery, ustawienia["tickery"])
         wymaga_zapisania = True
-        
+
     nowe_portfele = [p for p in df["Portfel"].unique() if p not in ustawienia["portfele"]]
     if nowe_portfele:
         ustawienia["portfele"].extend(nowe_portfele)
         nadpisz_liste(ws_portfele, ustawienia["portfele"])
         wymaga_zapisania = True
-        
+
     nowe_waluty = [w for w in df["Waluta"].unique() if w not in ustawienia["waluty"]]
     if nowe_waluty:
         ustawienia["waluty"].extend(nowe_waluty)
@@ -142,7 +186,7 @@ if dane_transakcji:
 else:
     df = pd.DataFrame(columns=WYMAGANE_KOLUMNY)
 
-# 3. Kursy walut i Suwaki Obligacji
+# 3. Kursy walut i Suwaki
 st.sidebar.title(":material/currency_exchange: Kursy walut")
 kursy = {"PLN": 1.0}
 blad_pobierania = False
@@ -150,18 +194,35 @@ blad_pobierania = False
 for waluta in ustawienia["waluty"]:
     if waluta == "PLN": continue
     try:
-        ticker_waluty = f"{waluta}PLN=X" 
-        kurs = yf.Ticker(ticker_waluty).history(period="1d")['Close'].iloc[0]
+        kurs = pobierz_kurs_walut(waluta)
         kursy[waluta] = kurs
         st.sidebar.metric(label=f"{waluta} / PLN", value=f"{kurs:.4f} zł")
-    except:
+    except Exception:
         blad_pobierania = True
-        awaryjne = {"USD": 4.00, "EUR": 4.30, "GBP": 5.00, "CHF": 4.50}
-        kursy[waluta] = awaryjne.get(waluta, 1.0)
+        kursy[waluta] = KURSY_AWARYJNE.get(waluta, 1.0)
         st.sidebar.metric(label=f"{waluta} / PLN", value=f"{kursy[waluta]:.4f} zł", delta="Błąd sieci", delta_color="inverse")
 
 if blad_pobierania: st.sidebar.warning(":material/wifi_off: Tryb Offline")
 else: st.sidebar.success(":material/wifi: Kursy na żywo")
+
+def kurs_fx(hist, d, waluta):
+    """Kurs waluty do PLN w danym dniu. Jedna funkcja dla wykresu i tabel, żeby liczby się zgadzały."""
+    if waluta == "PLN":
+        return 1.0
+    sym = symbol_fx(waluta)
+    if sym in hist.columns:
+        v = hist.at[d, sym]
+        if pd.notna(v) and v > 0:
+            return float(v)
+    return float(kursy.get(waluta, KURSY_AWARYJNE.get(waluta, 1.0)))
+
+def cena_aktywa(hist, d, ticker, domyslna):
+    """Cena aktywa w danym dniu albo wartość domyślna, gdy brak danych."""
+    if ticker in hist.columns:
+        v = hist.at[d, ticker]
+        if pd.notna(v) and v > 0:
+            return float(v)
+    return domyslna
 
 # ZAAWANSOWANE SUWAKI DLA OBLIGACJI (EDO/COI)
 st.sidebar.divider()
@@ -170,10 +231,14 @@ oprocentowanie_1r = st.sidebar.slider("Oprocentowanie w 1. roku (%)", min_value=
 oprocentowanie_kolejne = st.sidebar.slider("Kolejne lata: Inflacja + Marża (%)", min_value=1.0, max_value=15.0, value=6.25, step=0.05)
 st.sidebar.info("Aplikacja śledzi wiek każdej kupionej transzy. Po 365 dniach automatycznie przełącza zyski na tryb inflacyjny (FIFO).")
 
+st.sidebar.divider()
+st.sidebar.subheader("📈 Benchmarki")
+zalozona_inflacja = st.sidebar.slider("Zakładana roczna inflacja (%)", min_value=0.0, max_value=15.0, value=6.0, step=0.1)
+
 st.title(":material/monitoring: Twój Panel Inwestycyjny")
 
 tab1, tab2, tab3, tab4 = st.tabs([
-    ":material/dashboard: Dashboard", 
+    ":material/dashboard: Dashboard",
     ":material/add_circle: Dodaj transakcję",
     ":material/history: Historia",
     ":material/settings: Ustawienia"
@@ -182,21 +247,32 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # --- ZAKŁADKA 2: DODAWANIE TRANSAKCJI ---
 with tab2:
     st.header("Zarejestruj nową operację")
-    
+
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         data_operacji = st.date_input("Data operacji")
         portfel = st.selectbox("Wybierz portfel", ustawienia["portfele"])
-        
+
+    # Kolumna 3 jest wypełniana w dwóch krokach: najpierw typ i obligacja (potrzebne do
+    # rozpoznania tickera), a waluta dopiero po sprawdzeniu, w jakiej walucie notuje się ticker.
+    with col3:
+        typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
+        czy_obligacja = st.checkbox("🇵🇱 To jest Obligacja Skarbowa", help="Włącza specjalny algorytm kapitalizacji dla polskich obligacji.")
+
+    nazwa_yahoo = None
     with col2:
         opcje_tickerow = ["➕ Dodaj nowy..."] + ustawienia["tickery"]
         format_func = lambda x: x.replace('_OBL', ' (Obligacja)') if x != "➕ Dodaj nowy..." else x
         wybrany_ticker = st.selectbox("Wybierz Ticker", opcje_tickerow, format_func=format_func)
-        
+
         if wybrany_ticker == "➕ Dodaj nowy...":
             docelowy_ticker_input = st.text_input("Nowy symbol (np. AAPL lub EDO1032)").upper().strip()
-            docelowa_nazwa_input = st.text_input("Nazwa aktywa").strip()
+            docelowa_nazwa_input = st.text_input("Nazwa aktywa (puste = pobierze się automatycznie)").strip()
+            if docelowy_ticker_input and not czy_obligacja:
+                nazwa_yahoo = bezpiecznie(pobierz_nazwe_tickera, docelowy_ticker_input)
+                if nazwa_yahoo and not docelowa_nazwa_input:
+                    st.info(f"🏷️ Nazwa z Yahoo: {nazwa_yahoo}")
         else:
             docelowy_ticker_input = wybrany_ticker
             znane_nazwy = [str(n).strip() for n in df[df["Ticker"] == docelowy_ticker_input]["Nazwa"].unique() if str(n).strip()]
@@ -204,45 +280,60 @@ with tab2:
                 docelowa_nazwa_input = znane_nazwy[0]
                 st.info(f"🏷️ {docelowa_nazwa_input}")
             else:
-                docelowa_nazwa_input = st.text_input("Podaj nazwę dla tego tickera").strip()
-                
+                docelowa_nazwa_input = st.text_input("Podaj nazwę dla tego tickera (puste = pobierze się automatycznie)").strip()
+                if not docelowy_ticker_input.endswith("_OBL"):
+                    nazwa_yahoo = bezpiecznie(pobierz_nazwe_tickera, docelowy_ticker_input)
+
+    # Waluta, w jakiej Yahoo notuje wybrany ticker (nie dotyczy obligacji)
+    jest_obligacja = czy_obligacja if wybrany_ticker == "➕ Dodaj nowy..." else docelowy_ticker_input.endswith("_OBL")
+    waluta_yahoo = None
+    if docelowy_ticker_input and not jest_obligacja:
+        waluta_yahoo = bezpiecznie(pobierz_walute_notowan, docelowy_ticker_input)
+
+    waluty_wielkie = [w.upper() for w in ustawienia["waluty"]]
+    indeks_waluty = 0
+    if waluta_yahoo and waluta_yahoo.upper() in waluty_wielkie:
+        indeks_waluty = waluty_wielkie.index(waluta_yahoo.upper())
+
     with col3:
-        typ = st.selectbox("Typ operacji", ["KUPNO", "SPRZEDAŻ"])
-        czy_obligacja = st.checkbox("🇵🇱 To jest Obligacja Skarbowa", help="Włącza specjalny algorytm kapitalizacji dla polskich obligacji.")
-        waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"])
-        
+        waluta = st.selectbox("Waluta transakcji", ustawienia["waluty"], index=indeks_waluty)
+        if waluta_yahoo and waluta.upper() != waluta_yahoo.upper():
+            st.warning(f"Yahoo notuje ten ticker w {waluta_yahoo}, a wybrano {waluta}. Wycena w apce może być błędna.")
+        elif docelowy_ticker_input and not jest_obligacja and not waluta_yahoo and not nazwa_yahoo:
+            st.warning("Nie udało się potwierdzić tego tickera w Yahoo Finance. Jeśli jest błędny, wycena użyje ceny zakupu.")
+
     with col4:
         ilosc = st.number_input("Ilość", min_value=0.00001, format="%g", step=1.0)
         cena = st.number_input("Cena za sztukę", min_value=0.01, format="%g", step=10.0)
-        st.write("") 
-        zapisz = st.button("💾 Zapisz do portfela", type="primary", use_container_width=True)
+        st.write("")
+        zapisz = st.button("💾 Zapisz do portfela", type="primary", width='stretch')
 
     if zapisz:
         docelowy_ticker = docelowy_ticker_input
-        docelowa_nazwa = docelowa_nazwa_input
-        
+        docelowa_nazwa = docelowa_nazwa_input or nazwa_yahoo or ""
+
         if wybrany_ticker == "➕ Dodaj nowy..." and czy_obligacja and not docelowy_ticker.endswith("_OBL"):
             docelowy_ticker = f"{docelowy_ticker}_OBL"
-            
+
         if docelowy_ticker == "" or docelowa_nazwa == "":
             st.error("Podaj poprawny ticker i nazwę!")
         else:
             if docelowy_ticker not in ustawienia["tickery"]:
                 ustawienia["tickery"].append(docelowy_ticker)
                 nadpisz_liste(ws_tickery, ustawienia["tickery"])
-            
+
             ws_transakcje.append_row([
-                data_operacji.strftime("%Y-%m-%d"), 
-                portfel, 
-                docelowy_ticker, 
-                docelowa_nazwa, 
-                typ, 
-                float(ilosc if typ == "KUPNO" else -ilosc), 
-                float(cena), 
+                data_operacji.strftime("%Y-%m-%d"),
+                portfel,
+                docelowy_ticker,
+                docelowa_nazwa,
+                typ,
+                float(ilosc if typ == "KUPNO" else -ilosc),
+                float(cena),
                 waluta
             ], value_input_option='USER_ENTERED')
             st.success(f"Dodano {typ} dla {docelowy_ticker.replace('_OBL', '')} w chmurze!")
-            st.cache_data.clear() 
+            st.cache_data.clear()
             st.rerun()
 
 # --- ZAKŁADKA 3: HISTORIA ---
@@ -259,7 +350,7 @@ with tab3:
 # --- ZAKŁADKA 4: USTAWIENIA ---
 with tab4:
     col_portfele, col_waluty, col_tickery = st.columns(3)
-    
+
     with col_portfele:
         st.subheader(":material/folder_open: Portfele")
         st.write(", ".join(ustawienia["portfele"]))
@@ -315,98 +406,119 @@ with tab4:
 with tab1:
     if not df.empty:
         st.markdown("### Filtry")
-        
+
         col_f1, col_f2 = st.columns(2)
-        
+
         with col_f1:
             lista_portfeli = sorted(df["Portfel"].unique().tolist())
             wybrane_portfele = st.multiselect(
-                "Wybierz portfele do wyświetlenia:", 
-                options=lista_portfeli, 
+                "Wybierz portfele do wyświetlenia:",
+                options=lista_portfeli,
                 default=lista_portfeli
             )
-            
+
         with col_f2:
             df_temp = df[df["Portfel"].isin(wybrane_portfele)] if wybrane_portfele else df
             lista_aktywow = sorted(df_temp["Nazwa"].unique().tolist())
             wybrane_aktywa = st.multiselect(
-                "Wybierz aktywa do wyświetlenia:", 
-                options=lista_aktywow, 
+                "Wybierz aktywa do wyświetlenia:",
+                options=lista_aktywow,
                 default=lista_aktywow
             )
-            
+
         st.divider()
 
         df_filtered = df[
-            (df["Portfel"].isin(wybrane_portfele)) & 
+            (df["Portfel"].isin(wybrane_portfele)) &
             (df["Nazwa"].isin(wybrane_aktywa))
         ].copy()
 
+        # Wiersze z nieczytelną datą nie wywracają już apki - są pomijane z ostrzeżeniem
+        df_filtered['Data'] = pd.to_datetime(df_filtered['Data'], errors='coerce')
+        if df_filtered['Data'].isna().any():
+            st.warning(f"Pominięto {int(df_filtered['Data'].isna().sum())} wierszy z nieprawidłową datą. Sprawdź kolumnę Data w arkuszu (format RRRR-MM-DD).")
+            df_filtered = df_filtered.dropna(subset=['Data'])
+
         if not df_filtered.empty:
             df_filtered['Wartosc_Zakupu'] = df_filtered['Ilosc'] * df_filtered['Cena_Zakupu']
-            pozycje = df_filtered.groupby(["Portfel", "Ticker", "Nazwa", "Waluta"]).agg({"Ilosc": "sum", "Wartosc_Zakupu": "sum"}).reset_index()
-            pozycje['Cena_Zakupu'] = pozycje['Wartosc_Zakupu'] / pozycje['Ilosc']
-            pozycje = pozycje[pozycje["Ilosc"] > 0] 
-            
+            klucze = ["Portfel", "Ticker", "Nazwa", "Waluta"]
+            pozycje = df_filtered.groupby(klucze).agg(Ilosc=("Ilosc", "sum")).reset_index()
+            # Średnia cena zakupu liczona tylko z kupna - sprzedaż nie może zmieniać ceny, po której kupiłeś
+            kupna = df_filtered[df_filtered["Ilosc"] > 0].groupby(klucze).agg(
+                Ilosc_kupiona=("Ilosc", "sum"), Wartosc_kupna=("Wartosc_Zakupu", "sum")
+            ).reset_index()
+            pozycje = pozycje.merge(kupna, on=klucze, how="left")
+            pozycje["Cena_Zakupu"] = (pozycje["Wartosc_kupna"] / pozycje["Ilosc_kupiona"]).fillna(0.0)
+            pozycje = pozycje.drop(columns=["Ilosc_kupiona", "Wartosc_kupna"])
+            pozycje = pozycje[pozycje["Ilosc"] > 0].reset_index(drop=True)
+
             waluty_tickerow = {row['Ticker']: row['Waluta'] for _, row in pozycje.iterrows()}
             srednia_cena = {row['Ticker']: row['Cena_Zakupu'] for _, row in pozycje.iterrows()}
-            
-            df_filtered['Data'] = pd.to_datetime(df_filtered['Data'])
-            start_date = df_filtered['Data'].min().strftime('%Y-%m-%d')
-            
-            hist_data = pobierz_historie_notowan(df_filtered['Ticker'].unique().tolist(), start_date)
-            
-            if not hist_data.empty or True:
-                dates = pd.date_range(start=start_date, end=pd.Timestamp.today())
-                
-                if not hist_data.empty:
-                    hist_data.index = hist_data.index.tz_localize(None)
-                    hist_data = hist_data.reindex(dates).ffill().bfill()
-                else:
-                    hist_data = pd.DataFrame(index=dates)
-                
-                wklad_hist, wartosc_hist, sp500_hist, infl_hist, wig20_hist = [], [], [], [], []
-                zainwestowano_suma = 0.0
-                sp500_shares = 0.0
-                wig20_shares = 0.0
-                infl_kapital = 0.0
-                dzienna_stopa_infl = (1 + 0.06) ** (1/365) - 1 
-                
-                # Zmienne giełdowe i obligacyjne
-                dzienna_stopa_1 = (1 + oprocentowanie_1r / 100) ** (1/365) - 1
-                dzienna_stopa_2 = (1 + oprocentowanie_kolejne / 100) ** (1/365) - 1
-                
-                aktywne_obligacje = [] 
-                ilosc_aktywow = {t: 0.0 for t in df_filtered['Ticker'].unique()}
-                
-                for d in dates:
-                    # Ranna kapitalizacja obligacji na dany dzień
-                    if d != dates[0]:
-                        infl_kapital = infl_kapital * (1 + dzienna_stopa_infl)
-                        for obl in aktywne_obligacje:
-                            if obl['kwota'] > 0:
-                                wiek_dni = (d - obl['data_zakupu']).days
-                                if wiek_dni <= 365:
-                                    obl['kwota'] *= (1 + dzienna_stopa_1)
-                                else:
-                                    obl['kwota'] *= (1 + dzienna_stopa_2)
 
-                    tx_dnia = df_filtered[df_filtered['Data'] == d]
+            start_date = df_filtered['Data'].min().strftime('%Y-%m-%d')
+            tickery_do_pobrania = sorted(df_filtered['Ticker'].unique().tolist())
+            waluty_w_uzyciu = sorted(df_filtered['Waluta'].unique().tolist())
+
+            czas_notowan = ""
+            try:
+                hist_data, czas_notowan = pobierz_historie_notowan(tickery_do_pobrania, waluty_w_uzyciu, start_date)
+            except Exception:
+                hist_data = pd.DataFrame()
+                st.warning("Nie udało się pobrać notowań z Yahoo Finance. Wyceny używają cen zakupu i awaryjnych kursów walut. Odśwież stronę za chwilę.")
+
+            dates = pd.date_range(start=start_date, end=pd.Timestamp.today())
+
+            if not hist_data.empty:
+                hist_data.index = hist_data.index.tz_localize(None)
+                hist_data = hist_data.reindex(dates).ffill().bfill()
+
+                brak_danych = [
+                    t for t in tickery_do_pobrania
+                    if not str(t).endswith('_OBL') and (t not in hist_data.columns or hist_data[t].isna().all())
+                ]
+                if brak_danych:
+                    st.warning("Yahoo nie zwróciło notowań dla: " + ", ".join(brak_danych) + ". Te pozycje są wyceniane po cenie zakupu (zysk = 0). Sprawdź poprawność tickerów.")
+                if czas_notowan:
+                    st.caption(f"Notowania z Yahoo Finance, pobrane o {czas_notowan}. Odświeżają się co {CACHE_NOTOWAN_SEK // 60} min.")
+            else:
+                hist_data = pd.DataFrame(index=dates)
+
+            wklad_hist, wartosc_hist, sp500_hist, infl_hist, wig20_hist = [], [], [], [], []
+            zainwestowano_suma = 0.0
+            sp500_shares = 0.0
+            wig20_shares = 0.0
+            infl_kapital = 0.0
+            dzienna_stopa_infl = (1 + zalozona_inflacja / 100) ** (1/365) - 1
+
+            # Zmienne obligacyjne
+            dzienna_stopa_1 = (1 + oprocentowanie_1r / 100) ** (1/365) - 1
+            dzienna_stopa_2 = (1 + oprocentowanie_kolejne / 100) ** (1/365) - 1
+
+            aktywne_obligacje = []
+            ilosc_aktywow = {t: 0.0 for t in df_filtered['Ticker'].unique()}
+            tx_wg_dat = {data: grupa for data, grupa in df_filtered.groupby('Data')}
+
+            for d in dates:
+                # Ranna kapitalizacja obligacji na dany dzień
+                if d != dates[0]:
+                    infl_kapital = infl_kapital * (1 + dzienna_stopa_infl)
+                    for obl in aktywne_obligacje:
+                        if obl['kwota'] > 0:
+                            wiek_dni = (d - obl['data_zakupu']).days
+                            if wiek_dni <= 365:
+                                obl['kwota'] *= (1 + dzienna_stopa_1)
+                            else:
+                                obl['kwota'] *= (1 + dzienna_stopa_2)
+
+                usd_pln = kurs_fx(hist_data, d, "USD")
+                tx_dnia = tx_wg_dat.get(d)
+                if tx_dnia is not None:
                     for _, tx in tx_dnia.iterrows():
-                        w = tx['Waluta']
-                        fx = hist_data.loc[d, 'PLN=X'] if 'PLN=X' in hist_data.columns else 4.0
-                        if pd.isna(fx): fx = 4.0
-                        
-                        if w == 'EUR': 
-                            fx = hist_data.loc[d, 'EURPLN=X'] if 'EURPLN=X' in hist_data.columns else 4.3
-                            if pd.isna(fx): fx = 4.3
-                        elif w == 'PLN': 
-                            fx = 1.0
-                            
+                        fx = kurs_fx(hist_data, d, tx['Waluta'])
                         kwota = tx['Ilosc'] * tx['Cena_Zakupu'] * fx
                         zainwestowano_suma += kwota
                         ilosc_aktywow[tx['Ticker']] += tx['Ilosc']
-                        
+
                         # Rejestracja i obsługa transz obligacji
                         if str(tx['Ticker']).endswith('_OBL'):
                             if tx['Ilosc'] > 0:
@@ -430,77 +542,57 @@ with tab1:
                                             sztuki_do_odjecia -= obl['ilosc_szt']
                                             obl['kwota'] = 0.0
                                             obl['ilosc_szt'] = 0.0
-                        
-                        # Wirtualne zakupy indeksów
-                        sp500_cena = hist_data.loc[d, '^GSPC'] if '^GSPC' in hist_data.columns else 1.0
-                        if pd.isna(sp500_cena) or sp500_cena <= 0: sp500_cena = 1.0
-                        sp500_shares += kwota / sp500_cena
-                        
-                        wig20_cena = hist_data.loc[d, 'ETFW20L.WA'] if 'ETFW20L.WA' in hist_data.columns else 1.0
-                        if pd.isna(wig20_cena) or wig20_cena <= 0: wig20_cena = 1.0
+
+                        # Wirtualne zakupy indeksów (S&P 500 w USD przeliczany na PLN, żeby porównanie było uczciwe)
+                        sp500_cena = cena_aktywa(hist_data, d, '^GSPC', 1.0)
+                        sp500_shares += kwota / (sp500_cena * usd_pln)
+
+                        wig20_cena = cena_aktywa(hist_data, d, 'ETFW20L.WA', 1.0)
                         wig20_shares += kwota / wig20_cena
-                        
+
                         infl_kapital += kwota
-                    
-                    dzienna_wartosc = 0.0
-                    wartosc_obligacji_w_dniu = {}
-                    for obl in aktywne_obligacje:
-                        wartosc_obligacji_w_dniu[obl['ticker']] = wartosc_obligacji_w_dniu.get(obl['ticker'], 0.0) + obl['kwota']
 
-                    for t, ilosc in ilosc_aktywow.items():
-                        if ilosc > 0:
-                            if str(t).endswith('_OBL'):
-                                dzienna_wartosc += wartosc_obligacji_w_dniu.get(t, 0.0)
-                            else:
-                                cena_t = hist_data.loc[d, t] if t in hist_data.columns else np.nan
-                                if pd.isna(cena_t): 
-                                    cena_t = srednia_cena.get(t, 0.0)
-                                    
-                                w = waluty_tickerow.get(t, 'PLN')
-                                fx = hist_data.loc[d, 'PLN=X'] if 'PLN=X' in hist_data.columns else 4.0
-                                if pd.isna(fx): fx = 4.0
-                                
-                                if w == 'EUR': 
-                                    fx = hist_data.loc[d, 'EURPLN=X'] if 'EURPLN=X' in hist_data.columns else 4.3
-                                    if pd.isna(fx): fx = 4.3
-                                elif w == 'PLN': 
-                                    fx = 1.0
-                                    
-                                dzienna_wartosc += ilosc * cena_t * fx
-                            
-                    wklad_hist.append(zainwestowano_suma)
-                    wartosc_hist.append(dzienna_wartosc)
-                    infl_hist.append(infl_kapital)
-                    
-                    sp500_curr_price = hist_data.loc[d, '^GSPC'] if '^GSPC' in hist_data.columns else 1.0
-                    if pd.isna(sp500_curr_price): sp500_curr_price = 1.0
-                    sp500_hist.append(sp500_shares * sp500_curr_price)
-                    
-                    wig20_curr_price = hist_data.loc[d, 'ETFW20L.WA'] if 'ETFW20L.WA' in hist_data.columns else 1.0
-                    if pd.isna(wig20_curr_price): wig20_curr_price = 1.0
-                    wig20_hist.append(wig20_shares * wig20_curr_price)
-                
-                fig_main = go.Figure()
-                fig_main.add_trace(go.Scatter(x=dates, y=wartosc_hist, mode='lines', name='Wartość portfela', line=dict(color='#10b981', width=2.5), fill='tozeroy', fillcolor='rgba(16, 185, 129, 0.15)'))
-                fig_main.add_trace(go.Scatter(x=dates, y=wklad_hist, mode='lines', name='Wkład własny', line=dict(color='#3b82f6', width=2.5)))
-                fig_main.add_trace(go.Scatter(x=dates, y=sp500_hist, mode='lines', name='S&P 500', line=dict(color='#f59e0b', width=1.5, dash='dash')))
-                fig_main.add_trace(go.Scatter(x=dates, y=wig20_hist, mode='lines', name='WIG20', line=dict(color='#8b5cf6', width=1.5, dash='dashdot')))
-                fig_main.add_trace(go.Scatter(x=dates, y=infl_hist, mode='lines', name='Inflacja', line=dict(color='#ef4444', width=1.5, dash='dot')))
-                
-                if len(dates) > 0:
-                    fig_main.add_annotation(x=dates[-1], y=wartosc_hist[-1], text=f"{wartosc_hist[-1]:.0f}", showarrow=True, ax=40, ay=-15, bgcolor="#10b981", font=dict(color="white"), arrowcolor="#10b981")
-                    fig_main.add_annotation(x=dates[-1], y=wklad_hist[-1], text=f"{wklad_hist[-1]:.0f}", showarrow=True, ax=40, ay=15, bgcolor="#3b82f6", font=dict(color="white"), arrowcolor="#3b82f6")
+                dzienna_wartosc = 0.0
+                wartosc_obligacji_w_dniu = {}
+                for obl in aktywne_obligacje:
+                    wartosc_obligacji_w_dniu[obl['ticker']] = wartosc_obligacji_w_dniu.get(obl['ticker'], 0.0) + obl['kwota']
 
-                fig_main.update_layout(title="Wkład i wartość wybranych portfeli w czasie [PLN]", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=50, b=0, l=0, r=40), height=500)
-                st.plotly_chart(fig_main, width='stretch')
-                st.divider()
+                for t, ilosc in ilosc_aktywow.items():
+                    if ilosc > 0:
+                        if str(t).endswith('_OBL'):
+                            dzienna_wartosc += wartosc_obligacji_w_dniu.get(t, 0.0)
+                        else:
+                            cena_t = cena_aktywa(hist_data, d, t, srednia_cena.get(t, 0.0))
+                            fx = kurs_fx(hist_data, d, waluty_tickerow.get(t, 'PLN'))
+                            dzienna_wartosc += ilosc * cena_t * fx
+
+                wklad_hist.append(zainwestowano_suma)
+                wartosc_hist.append(dzienna_wartosc)
+                infl_hist.append(infl_kapital)
+                sp500_hist.append(sp500_shares * cena_aktywa(hist_data, d, '^GSPC', 1.0) * usd_pln)
+                wig20_hist.append(wig20_shares * cena_aktywa(hist_data, d, 'ETFW20L.WA', 1.0))
+
+            fig_main = go.Figure()
+            fig_main.add_trace(go.Scatter(x=dates, y=wartosc_hist, mode='lines', name='Wartość portfela', line=dict(color='#10b981', width=2.5), fill='tozeroy', fillcolor='rgba(16, 185, 129, 0.15)'))
+            fig_main.add_trace(go.Scatter(x=dates, y=wklad_hist, mode='lines', name='Wkład własny', line=dict(color='#3b82f6', width=2.5)))
+            fig_main.add_trace(go.Scatter(x=dates, y=sp500_hist, mode='lines', name='S&P 500 (w PLN)', line=dict(color='#f59e0b', width=1.5, dash='dash')))
+            fig_main.add_trace(go.Scatter(x=dates, y=wig20_hist, mode='lines', name='WIG20', line=dict(color='#8b5cf6', width=1.5, dash='dashdot')))
+            fig_main.add_trace(go.Scatter(x=dates, y=infl_hist, mode='lines', name='Inflacja', line=dict(color='#ef4444', width=1.5, dash='dot')))
+
+            if len(dates) > 0:
+                fig_main.add_annotation(x=dates[-1], y=wartosc_hist[-1], text=f"{wartosc_hist[-1]:.0f}", showarrow=True, ax=40, ay=-15, bgcolor="#10b981", font=dict(color="white"), arrowcolor="#10b981")
+                fig_main.add_annotation(x=dates[-1], y=wklad_hist[-1], text=f"{wklad_hist[-1]:.0f}", showarrow=True, ax=40, ay=15, bgcolor="#3b82f6", font=dict(color="white"), arrowcolor="#3b82f6")
+
+            fig_main.update_layout(title="Wkład i wartość wybranych portfeli w czasie [PLN]", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=50, b=0, l=0, r=40), height=500)
+            st.plotly_chart(fig_main, width='stretch')
+            st.divider()
 
             if not pozycje.empty:
                 for index, row in pozycje.iterrows():
                     ticker = row["Ticker"]
                     w_akt = row["Waluta"]
-                    k_wym = kursy.get(w_akt, 1.0)
-                    
+                    k_wym = kurs_fx(hist_data, dates[-1], w_akt)
+
                     if str(ticker).endswith('_OBL'):
                         wartosc_obl_calkowita = sum(obl['kwota'] for obl in aktywne_obligacje if obl['ticker'] == ticker)
                         if row["Ilosc"] > 0:
@@ -510,13 +602,11 @@ with tab1:
                             wart_obecna_oryg = 0.0
                             aktualna_cena = row["Cena_Zakupu"]
                     else:
-                        aktualna_cena = hist_data[ticker].iloc[-1] if not hist_data.empty and ticker in hist_data.columns else row["Cena_Zakupu"]
-                        if pd.isna(aktualna_cena): aktualna_cena = row["Cena_Zakupu"]
+                        aktualna_cena = cena_aktywa(hist_data, dates[-1], ticker, row["Cena_Zakupu"])
                         wart_obecna_oryg = aktualna_cena * row["Ilosc"]
-                    
+
                     zainw_oryg = row["Cena_Zakupu"] * row["Ilosc"]
-                    
-                    # Idealne ucinanie do dwóch miejsc po przecinku
+
                     pozycje.at[index, "Cena zakupu"] = f"{row['Cena_Zakupu']:.2f} {w_akt}"
                     pozycje.at[index, "Obecna Cena"] = f"{aktualna_cena:.2f} {w_akt}"
                     pozycje.at[index, "Zainwestowano (zł)"] = zainw_oryg * k_wym
@@ -539,7 +629,7 @@ with tab1:
                 m2.metric("Wkład", f"{calkowicie_zainwestowano:,.2f} zł".replace(",", " "))
                 m3.metric("Zysk", f"{calkowity_zysk:,.2f} zł".replace(",", " "), f"{calkowity_zysk:,.2f} zł")
                 m4.metric("ROI", f"{calkowite_roi:.2f} %", f"{calkowite_roi:.2f} %")
-                
+
                 st.divider()
 
                 w1, w2 = st.columns(2)
@@ -559,13 +649,13 @@ with tab1:
 
                 st.subheader("Szczegóły pozycji")
                 widok = pozycje[["Portfel", "Ticker", "Nazwa", "Ilosc", "Cena zakupu", "Obecna Cena", "Wartość (zł)", "Zysk/Strata (zł)", "ROI (%)"]].copy()
-                
+
                 widok["Ticker"] = widok["Ticker"].str.replace("_OBL", "")
                 widok["Ilosc"] = widok["Ilosc"].apply(lambda x: f"{x:.4f}".rstrip('0').rstrip('.') if '.' in f"{x:.4f}" else f"{x:.4f}")
                 widok["Wartość (zł)"] = widok["Wartość (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["Zysk/Strata (zł)"] = widok["Zysk/Strata (zł)"].apply(lambda x: f"{x:,.2f} zł".replace(",", " "))
                 widok["ROI (%)"] = widok["ROI (%)"].apply(lambda x: f"{x:.2f} %")
-                
+
                 # Funkcja malująca komórki na zielono i czerwono
                 def koloruj_wynik(val):
                     try:
@@ -578,12 +668,12 @@ with tab1:
                     except:
                         pass
                     return ''
-                
+
                 if hasattr(widok.style, 'map'):
                     styled_widok = widok.style.map(koloruj_wynik, subset=["Zysk/Strata (zł)", "ROI (%)"])
                 else:
                     styled_widok = widok.style.applymap(koloruj_wynik, subset=["Zysk/Strata (zł)", "ROI (%)"])
-                
+
                 st.dataframe(styled_widok, width='stretch', hide_index=True)
 
             else:
