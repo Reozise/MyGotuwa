@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
@@ -133,6 +134,47 @@ def pobierz_nazwe_tickera(ticker):
         raise ValueError("Brak nazwy")
     return str(nazwa)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def pobierz_dane_fundamentalne(ticker):
+    t = yf.Ticker(ticker)
+    info = t.info or {}
+
+    hist_df = pd.DataFrame()
+    try:
+        inc = t.income_stmt
+        if inc is not None and not inc.empty:
+            inc_t = inc.T.sort_index()
+            inc_t.index = inc_t.index.strftime("%Y")
+            kolumny_map = {
+                "Total Revenue": "Przychody",
+                "Net Income": "Zysk netto",
+                "Basic EPS": "EPS"
+            }
+            dostepne = [k for k in kolumny_map if k in inc_t.columns]
+            if dostepne:
+                hist_df = inc_t[dostepne].rename(columns=kolumny_map).dropna(how="all")
+    except Exception:
+        pass
+
+    cena_biezaca = info.get("currentPrice") or info.get("regularMarketPrice")
+    if not cena_biezaca:
+        try:
+            h = t.history(period="5d")["Close"].dropna()
+            if not h.empty:
+                cena_biezaca = float(h.iloc[-1])
+        except Exception:
+            cena_biezaca = None
+
+    return {"info": info, "hist_df": hist_df, "cena_biezaca": cena_biezaca}
+
+def formatuj_liczbe(val, sufix=""):
+    try:
+        if val is not None and isinstance(val, (int, float)) and np.isfinite(val):
+            return f"{val:.2f}{sufix}"
+    except Exception:
+        pass
+    return "Brak danych"
+
 def bezpiecznie(funkcja, *args):
     try:
         return funkcja(*args)
@@ -237,10 +279,11 @@ zalozona_inflacja = st.sidebar.slider("Zakładana roczna inflacja (%)", min_valu
 
 st.title(":material/monitoring: Twój Panel Inwestycyjny")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab_analiza, tab4 = st.tabs([
     ":material/dashboard: Dashboard",
     ":material/add_circle: Dodaj transakcję",
     ":material/history: Historia",
+    ":material/analytics: Analiza",
     ":material/settings: Ustawienia"
 ])
 
@@ -346,6 +389,202 @@ with tab3:
         st.info("Aby usunąć lub zedytować starszą transakcję, otwórz bezpośrednio swój arkusz Google Sheets.")
     else:
         st.info("Brak transakcji w chmurze.")
+
+# --- ZAKŁADKA ANALIZA: WSKAŹNIKI I REKOMENDACJE ANALITYKÓW ---
+with tab_analiza:
+    st.header("Analiza fundamentalna i prognozy analityków")
+
+    tickery_do_analizy = [
+        t for t in ustawienia["tickery"]
+        if not str(t).endswith("_OBL") and "-USD" not in str(t) and "-EUR" not in str(t)
+    ]
+    mapa_nazw = {}
+    if not df.empty:
+        for _, r in df.iterrows():
+            t_kod = str(r["Ticker"]).strip()
+            t_naz = str(r["Nazwa"]).strip()
+            if t_kod and t_naz and t_kod not in mapa_nazw:
+                mapa_nazw[t_kod] = t_naz
+
+    col_a1, col_a2 = st.columns(2)
+    with col_a1:
+        opcje_analiza = ["-- Wpisz własny symbol obok --"] + tickery_do_analizy
+        wybrany_z_portfela = st.selectbox(
+            "Wybierz spółkę z Twojej listy:",
+            options=opcje_analiza,
+            format_func=lambda x: f"{x} ({mapa_nazw[x]})" if x in mapa_nazw else x
+        )
+    with col_a2:
+        wpisany_symbol = st.text_input(
+            "Lub wpisz dowolny ticker (np. PKO.WA, CDR.WA, AAPL, MSFT):",
+            value="PKO.WA" if not tickery_do_analizy else ""
+        ).upper().strip()
+
+    aktywny_ticker = wpisany_symbol if wpisany_symbol else (
+        wybrany_z_portfela if wybrany_z_portfela != "-- Wpisz własny symbol obok --" else ""
+    )
+
+    if aktywny_ticker:
+        czy_gpw = aktywny_ticker.endswith(".WA")
+        czysty_symbol = aktywny_ticker.replace(".WA", "")
+
+        with st.spinner(f"Pobieranie danych fundamentalnych dla {aktywny_ticker}..."):
+            wynik_analizy = bezpiecznie(pobierz_dane_fundamentalne, aktywny_ticker) or {
+                "info": {},
+                "hist_df": pd.DataFrame(),
+                "cena_biezaca": None
+            }
+
+        info = wynik_analizy["info"]
+        hist_df = wynik_analizy["hist_df"]
+        cena_biezaca = wynik_analizy["cena_biezaca"]
+
+        nazwa_spolki = info.get("longName") or info.get("shortName") or mapa_nazw.get(aktywny_ticker, aktywny_ticker)
+        waluta_spolki = info.get("currency") or ("PLN" if czy_gpw else "USD")
+
+        st.subheader(f"{nazwa_spolki} ({aktywny_ticker})")
+        if cena_biezaca:
+            st.caption(f"Ostatni kurs: {cena_biezaca:.2f} {waluta_spolki}")
+
+        # 1. Wskaźniki EPS, P/E (obecne i Forward)
+        st.markdown("#### Wskaźniki wyceny (obecne i prognozowane Forward)")
+        w1, w2, w3, w4, w5 = st.columns(5)
+        w1.metric("P/E (C/Z) obecne", formatuj_liczbe(info.get("trailingPE")))
+        w2.metric("Forward P/E (prognoza)", formatuj_liczbe(info.get("forwardPE")))
+        w3.metric(f"EPS [{waluta_spolki}]", formatuj_liczbe(info.get("trailingEps")))
+        w4.metric(f"Forward EPS [{waluta_spolki}]", formatuj_liczbe(info.get("forwardEps")))
+        w5.metric("P/BV (C/WK)", formatuj_liczbe(info.get("priceToBook")))
+
+        st.divider()
+
+        # 2. Konsensus analityków i ceny docelowe
+        st.markdown("#### Konsensus analityków i ceny docelowe")
+        target_mean = info.get("targetMeanPrice")
+        target_low = info.get("targetLowPrice")
+        target_high = info.get("targetHighPrice")
+        rekomendacja = info.get("recommendationKey")
+        liczba_analitykow = info.get("numberOfAnalystOpinions")
+
+        if target_mean and cena_biezaca and isinstance(target_mean, (int, float)) and np.isfinite(target_mean):
+            potencjal = ((target_mean - cena_biezaca) / cena_biezaca) * 100
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Konsensus", rekomendacja.upper().replace("_", " ") if rekomendacja else "Brak danych")
+            r2.metric(
+                f"Średni cel cenowy [{waluta_spolki}]",
+                f"{target_mean:.2f}",
+                delta=f"{potencjal:+.2f}%"
+            )
+            widelki = (
+                f"{target_low:.2f} - {target_high:.2f}"
+                if isinstance(target_low, (int, float)) and isinstance(target_high, (int, float))
+                else "Brak danych"
+            )
+            r3.metric(f"Widełki celów [{waluta_spolki}]", widelki)
+            r4.metric("Liczba analityków", str(liczba_analitykow) if liczba_analitykow else "Brak danych")
+        else:
+            st.info(
+                "Brak zagregowanych cen docelowych w API Yahoo Finance dla tego symbolu "
+                "(częste dla mniejszych spółek z GPW / NewConnect). Poniżej znajdują się bezpośrednie linki do raportów i szacunków."
+            )
+
+        st.divider()
+
+        # 3. Bezpośrednie linki do źródeł zewnętrznych
+        st.markdown("#### Raporty analityczne, prognozy EPS i konsensusy")
+        if czy_gpw:
+            l1, l2, l3 = st.columns(3)
+            l1.link_button(
+                "BiznesRadar (EPS, P/E, wskaźniki)",
+                f"https://www.biznesradar.pl/wskazniki-wartosci-rynkowej/{czysty_symbol}",
+                icon=":material/open_in_new:",
+                width='stretch'
+            )
+            l2.link_button(
+                "GPWPA (Raporty PDF i DM BDM)",
+                "https://www.gpw.pl/gpwpa",
+                icon=":material/description:",
+                width='stretch'
+            )
+            l3.link_button(
+                "TradingView (Szacunki analityków)",
+                f"https://pl.tradingview.com/symbols/GPW-{czysty_symbol}/forecast/",
+                icon=":material/monitoring:",
+                width='stretch'
+            )
+        else:
+            l1, l2, l3, l4 = st.columns(4)
+            l1.link_button(
+                "StockAnalysis (Forecast & EPS)",
+                f"https://stockanalysis.com/stocks/{czysty_symbol.lower()}/forecast/",
+                icon=":material/open_in_new:",
+                width='stretch'
+            )
+            l2.link_button(
+                "TipRanks (Konsensus i cele)",
+                f"https://www.tipranks.com/stocks/{czysty_symbol.lower()}/forecast",
+                icon=":material/open_in_new:",
+                width='stretch'
+            )
+            l3.link_button(
+                "Yahoo Finance (Analysis)",
+                f"https://finance.yahoo.com/quote/{aktywny_ticker}/analysis/",
+                icon=":material/open_in_new:",
+                width='stretch'
+            )
+            l4.link_button(
+                "TradingView (Szacunki)",
+                f"https://pl.tradingview.com/symbols/{czysty_symbol}/forecast/",
+                icon=":material/monitoring:",
+                width='stretch'
+            )
+
+        # 4. Historia wyników rocznych (tabela + wykres Plotly)
+        if not hist_df.empty:
+            st.divider()
+            st.markdown("#### Historia wyników rocznych")
+            col_htab, col_hchart = st.columns(2)
+            with col_htab:
+                st.dataframe(hist_df, width='stretch')
+            with col_hchart:
+                kolumna_wykresu = "EPS" if "EPS" in hist_df.columns else hist_df.columns[0]
+                fig_eps = px.bar(
+                    hist_df.reset_index(),
+                    x="index",
+                    y=kolumna_wykresu,
+                    labels={"index": "Rok", kolumna_wykresu: kolumna_wykresu},
+                    title=f"Historyczny {kolumna_wykresu}"
+                )
+                fig_eps.update_traces(marker_color="#10b981")
+                fig_eps.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=300)
+                st.plotly_chart(fig_eps, width='stretch')
+
+        # 5. Interaktywny widżet sprawozdań finansowych TradingView
+        st.divider()
+        col_tv1, col_tv2 = st.columns([3, 1])
+        with col_tv1:
+            st.markdown("#### Szczegółowe dane finansowe (TradingView)")
+        with col_tv2:
+            motyw_tv = st.selectbox("Motyw widżetu", ["dark", "light"], label_visibility="collapsed")
+
+        tv_symbol = f"GPW:{czysty_symbol}" if czy_gpw else czysty_symbol
+        tv_html = f"""
+        <div class="tradingview-widget-container">
+          <div class="tradingview-widget-container__widget"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-financials.js" async>
+          {{
+            "isTransparent": false,
+            "largeChartUrl": "",
+            "displayMode": "regular",
+            "width": "100%",
+            "height": 550,
+            "colorTheme": "{motyw_tv}",
+            "symbol": "{tv_symbol}",
+            "locale": "pl"
+          }}
+          </script>
+        </div>
+        """
+        components.html(tv_html, height=560)
 
 # --- ZAKŁADKA 4: USTAWIENIA ---
 with tab4:
